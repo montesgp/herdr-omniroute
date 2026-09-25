@@ -53,7 +53,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - [x] `scripts/start.ps1`: si puerto libre, lanza `node mjs serve --daemon --no-open`.
 - [x] `scripts/dashboard.ps1`: abre http://localhost:20128.
 - [x] `herdr plugin link` + `herdr plugin action invoke herdr.omniroute.status` OK (UP, exit 0) y `start` OK (already UP).
-- [ ] Push a GitHub `montesgp/herdr-omniroute` (topic `herdr-plugin`) — PENDIENTE decisión del usuario (entrega).
+- [x] Push a GitHub `montesgp/herdr-omniroute` — público, topic `herdr-plugin`, default branch `main`, ramas `dev`/`staging`/`main` (todas en el mismo commit base). Docs públicas: README (diagrama Mermaid), `docs/architecture.md`, `LICENSE` (MIT). Commit docs: 2f0985c.
 - Commit: `804c336 feat(plugin): add herdr-omniroute status/start/dashboard actions`
 
 ### T3 — Extensión pi `omniroute.ts` — DONE ✅
@@ -96,4 +96,4 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - 2026-09-25 (15:18): T2 y T3 COMPLETADAS por writer delegado y verificadas por el orquestador (gatekeeper: archivos presentes, link enabled, action status UP, hash repo↔deploy idéntico, keybind añadido). Commits: 804c336 (plugin), 96aad49 (extensión). Riesgos anotados: pi instalado es 0.87.1 (API equivalente); campo `author` no documentado en manifest (Herdr lo ignora); `setStatus/notify` devuelven void (await inofensivo bajo jiti); `herdr plugin action invoke` devuelve `running` (stdout vía `herdr plugin log list`); carga real en sesión pi TTY + tecla `prefix+o` + dashboard end-to-end no verificables aquí.
 
 ## Next step
-T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) con el usuario; push `montesgp/herdr-omniroute` cuando el usuario lo apruebe; `.gitignore` opcional.
+T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) y pruebas del usuario (prefix+o, `/omniroute`, scheduler al reiniciar); pedir ajustes al usuario si los detecta.
