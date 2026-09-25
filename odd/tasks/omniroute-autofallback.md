@@ -1,6 +1,6 @@
 # Feature: OmniRoute auto-fallback gateway — Herdr plugin + pi extension
 
-Status: **in progress** — T1 done, T2/T3 pending, T4 needs user.
+Status: **in progress** — T1–T3 done, T2.1 (status pane) done, T4 needs user.
 
 ## Objective
 Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo el stack de agentes (pi/gentle-shell, codex, claude) con garantía de que siempre corre mientras el usuario trabaja en Herdr, y con visibilidad/control desde Herdr y desde pi (aviso post-call cuando se usa un respaldo).
@@ -19,7 +19,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 
 ## Scope
 - Repo nuevo `C:\repositories\personal\herdr-omniroute` (publicable como `montesgp/herdr-omniroute`, topic `herdr-plugin`).
-- Plugin Herdr con manifest `herdr-plugin.toml`: acción `status`, acción `start`, acción `dashboard`, keybind `prefix+o`.
+- Plugin Herdr con manifest `herdr-plugin.toml`: acción `status`, acción `start`, acción `dashboard`, acción `open-status-pane`, pane `status` (tab auto-abierto) y keybind `prefix+o`.
 - Extensión pi en `~/.pi/agent/extensions/omniroute.ts`: slash `/omniroute [status|start|dashboard]` + `setStatus` en footer + aviso `ui.notify` post-call ante respuestas anómalas del gateway.
 - Scheduled task `OmniRouteGateway` + script `%USERPROFILE%\omniroute-start.cmd` (garantía de arranque al logon con restart-on-failure).
 - Configuración de providers/combos en OmniRoute vía dashboard/TUI (T4, requiere al usuario).
@@ -65,6 +65,16 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - [x] Carga validada: `EXT OK true` (node strip-types ESM) + smoke test (sesión_start → ●, 500 → warn, 200 silencioso, `/omniroute status` → UP).
 - Commit: `96aad49 feat(extension): add pi /omniroute gateway status extension`. Nota: pi real instalado es 0.87.1 (equivalente a 0.86.1 verificado en types).
 
+### T2.1 — Status pane (sección visible en Herdr para status plugins) — DONE ✅
+- [x] `scripts/status-dashboard.ps1`: dashboard live (UP/DOWN + combos + refresh cada 8s) con switch `-Once` para test sin loop; strip de ANSI del CLI de OmniRoute.
+- [x] `[[panes]]` en manifest: `id = "status"`, `title = "OmniRoute Gateway"`, `placement = "tab"`.
+- [x] `scripts/open-status-pane.ps1` idempotente (si `herdr pane list` ya muestra el pane, no duplica).
+- [x] `[[startup]]` hook → auto-apertura al restaurar sesión de Herdr (aplica en próximos arranques).
+- [x] Acción `herdr.omniroute.open-status-pane`; manifest v0.2.0.
+- [x] `docs/status-panes.md`: patrón reutilizable de status plugins (roadmap: output total entre proyectos; plugins por proyecto irán a pi).
+- [x] Test `-Once` OK: UP + combos `Kimi Coding`/`static-best-coding`. Pane abierto manualmente en la sesión activa.
+- Evidencia: manifest v0.2.0 con panes/startup; test dashboard; pane abierto (pestaña visible).
+
 ### T4 — Configuración de providers/combos en OmniRoute — REQUIERE USUARIO
 - [x] Usuario: abrió dashboard y creó dos combos habilitados — `Kimi Coding` [priority] y `static-best-coding` [weighted] — con providers conectados (gemini/g4f-gemini/uncloseai activos; opencode/OpenCode Free, chipotle, cloudflare-playground, duckduckgo-web, felo-web, aihorde, theoldllm).
 - [ ] Probe: llamada con modelo auto vía endpoint /v1 (curl) → confirmar corte automático y headers de respuesta.
@@ -94,6 +104,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - 2026-09-25 (14:50): combos creados por usuario: `Kimi Coding` [priority], `static-best-coding` [weighted]; `omniroute combo switch <name>` cambia el activo. T4a (providers+combos) lista; falta probe /v1 + provider custom en pi (T4b).
 - Próximo (en curso): T2+T3 vía writer delegado.
 - 2026-09-25 (15:18): T2 y T3 COMPLETADAS por writer delegado y verificadas por el orquestador (gatekeeper: archivos presentes, link enabled, action status UP, hash repo↔deploy idéntico, keybind añadido). Commits: 804c336 (plugin), 96aad49 (extensión). Riesgos anotados: pi instalado es 0.87.1 (API equivalente); campo `author` no documentado en manifest (Herdr lo ignora); `setStatus/notify` devuelven void (await inofensivo bajo jiti); `herdr plugin action invoke` devuelve `running` (stdout vía `herdr plugin log list`); carga real en sesión pi TTY + tecla `prefix+o` + dashboard end-to-end no verificables aquí.
+- 2026-09-25 (15:38): T2.1 completada (ruta inline: piezas mecánicas derivadas de la doc oficial de panes, sin investigación nueva; verificación local `-Once` imprime UP + combos). Pane `status` (tab) declarado + startup idempotente + acción `open-status-pane`; manifest 0.2.0; `docs/status-panes.md` documenta el patrón reutilizable y la hoja de ruta (output total entre proyectos; plugins por proyecto → pi).
 
 ## Next step
-T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) y pruebas del usuario (prefix+o, `/omniroute`, scheduler al reiniciar); pedir ajustes al usuario si los detecta.
+T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) y pruebas del usuario (ver la pestaña "OmniRoute Gateway", `prefix+o`, `/omniroute`, scheduler al reiniciar). Futuro: plugin general de output total entre proyectos siguiendo `docs/status-panes.md`.

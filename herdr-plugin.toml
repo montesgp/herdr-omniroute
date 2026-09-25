@@ -1,6 +1,6 @@
 id = "herdr.omniroute"
 name = "OmniRoute Gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "Status, start and dashboard for the OmniRoute auto-fallback gateway (localhost:20128)"
 author = "montesgp"
 platforms = ["windows"]
@@ -23,3 +23,18 @@ id = "dashboard"
 title = "OmniRoute: open dashboard"
 contexts = ["workspace"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/dashboard.ps1"]
+
+[[actions]]
+id = "open-status-pane"
+title = "OmniRoute: open status pane"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/open-status-pane.ps1"]
+
+[[panes]]
+id = "status"
+title = "OmniRoute Gateway"
+placement = "tab"
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/status-dashboard.ps1"]
+
+[[startup]]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/open-status-pane.ps1"]

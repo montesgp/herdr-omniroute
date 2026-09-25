@@ -14,7 +14,7 @@ flowchart LR
   subgraph HERDR["Herdr — multiplexor de sesiones"]
     direction TB
     S["Sesiones de agentes"]
-    P["herdr-omniroute plugin<br/>(status · start · dashboard — prefix+o)"]
+    P["herdr-omniroute plugin<br/>(status · start · dashboard · pestaña status — prefix+o)"]
   end
   subgraph AGENTES["Agentes (clientes OpenAI-compatible)"]
     direction TB
@@ -54,7 +54,7 @@ flowchart LR
 
 | Layer | Component | Responsibility |
 | --- | --- | --- |
-| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: status dot, start action, dashboard, `/omniroute` |
+| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: status tab (UP/DOWN + combos), status dot, actions, `/omniroute` |
 | 1 — Agentes | pi, Claude Code, Codex CLI | Arbitrary OpenAI-compatible clients that POST to `:20128/v1` |
 | 2 — Gateway | OmniRoute (`localhost:20128`) | Single entry point; owns combos and provider routing |
 | 3 — Providers | gemini, kimi, OpenCode Free, uncloseai, ... | Real backends; exhausted/slow ones are bypassed by the combo |
@@ -92,10 +92,13 @@ flowchart LR
 
 | Path | Purpose |
 | --- | --- |
-| `herdr-plugin.toml` | Herdr plugin manifest (3 workspace actions) |
+| `herdr-plugin.toml` | Herdr plugin manifest (4 workspace actions, 1 status pane, 1 startup hook) |
 | `scripts/status.ps1` | Port 20128 check; exit 0 = up, 1 = down |
 | `scripts/start.ps1` | No-op if up; else `serve --daemon --no-open` |
 | `scripts/dashboard.ps1` | Opens `http://localhost:20128` |
+| `scripts/status-dashboard.ps1` | Live dashboard for the status tab (render loop + `-Once` test switch) |
+| `scripts/open-status-pane.ps1` | Idempotent tab opener (startup hook and `open-status-pane` action) |
+| `docs/status-panes.md` | Reusable pattern for future status plugins |
 | `extensions/omniroute.ts` | pi extension source (deployed to `~/.pi/agent/extensions/`) |
 | `odd/tasks/omniroute-autofallback.md` | Feature tracker (ODD) — evidence of what was built and verified |
 
