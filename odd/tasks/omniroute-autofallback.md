@@ -64,7 +64,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - [ ] Carga con pi (jiti, sin compilación): `pi --extension` de prueba.
 
 ### T4 — Configuración de providers/combos en OmniRoute — REQUIERE USUARIO
-- [ ] Usuario: abrir dashboard http://localhost:20128, añadir providers (p.ej. OpenAI/Anthropic + un free como OpenCode Free) y crear el combo `auto` con fallback Subscription→API→Cheap→Free.
+- [x] Usuario: abrió dashboard y creó dos combos habilitados — `Kimi Coding` [priority] y `static-best-coding` [weighted] — con providers conectados (gemini/g4f-gemini/uncloseai activos; opencode/OpenCode Free, chipotle, cloudflare-playground, duckduckgo-web, felo-web, aihorde, theoldllm).
 - [ ] Probe: llamada con modelo auto vía endpoint /v1 (curl) → confirmar corte automático y headers de respuesta.
 - [ ] Registrar en pi un custom provider `omniroute` (models.json o registerProvider) apuntando a http://localhost:20128 (validar formato antes de tocar config real).
 - [ ] Ajustar perfil/agente en gentle-pi si se decide fijar modelo crítico sin fallback (decisión pendiente del usuario).
@@ -89,7 +89,8 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 
 ## Progress notes
 - 2026-09-25: T1 completada. Gateway corriendo en :20128 (arranque manual con entry node). Task `OmniRouteGateway` Ready con `serve --daemon --no-open`. Repo creado (git init, branch feat/omniroute-autofallback). Descubrimiento: OmniRoute escribe `~/.omniroute` (storage.sqlite 1.6MB, .env STORAGE_ENCRYPTION_KEY) — NO mostrar valores de .env; `server-ws.mjs` es el worker del serve. Config Dir NOT found → T4 pendiente de primera configuración.
-- Próximo: T2 (plugin Herdr).
+- 2026-09-25 (14:50): combos creados por usuario: `Kimi Coding` [priority], `static-best-coding` [weighted]; `omniroute combo switch <name>` cambia el activo. T4a (providers+combos) lista; falta probe /v1 + provider custom en pi (T4b).
+- Próximo (en curso): T2+T3 vía writer delegado.
 
 ## Next step
-Implementar T2 (manifest + scripts + link + prueba) y T3 (extensión pi), luego T4 con el usuario.
+T2+T3 en ejecución por writer delegado (ruta directa delegada: archivos mecánicos ya especificados por el orquestador); gatekeeper verifica al retorno; luego T4b (probe + provider custom pi) con el usuario.
