@@ -59,7 +59,7 @@ flowchart LR
 1. Any OpenAI-compatible agent (pi, Claude Code, Codex CLI) calls `http://localhost:20128/v1`.
 2. OmniRoute picks the active combo — `Kimi Coding [priority]` or `static-best-coding [weighted]`.
 3. The combo serves providers in order/weight; when one is exhausted (429/5xx), the next one answers the same request. The agent never sees the failure.
-4. Herdr opens a dedicated **status tab** (`OmniRoute Gateway`) at session restore — UP/DOWN and the configured combos, live. Sessions can also check/start/open the gateway via the plugin actions or `prefix+o`; pi shows a footer dot (`●`/`○`) and warns on non-2xx post-call responses.
+4. Herdr opens the **status tab** (`OmniRoute Gateway`) in every existing workspace at session restore — UP/DOWN and the configured combos, live, refreshed in-place. Sessions can also check/start/open the gateway via the plugin actions or `prefix+o`; pi shows a footer dot (`●`/`○`) and warns on non-2xx post-call responses.
 
 Full layered description: [docs/architecture.md](docs/architecture.md).
 
@@ -68,7 +68,7 @@ Full layered description: [docs/architecture.md](docs/architecture.md).
 | Component | Location | Role |
 | --- | --- | --- |
 | Herdr plugin | `herdr-plugin.toml` + `scripts/*.ps1` | `status` / `start` / `dashboard` / `open-status-pane` workspace actions |
-| Status pane | `scripts/status-dashboard.ps1` + `[[panes]]`/`[[startup]]` | Tab "OmniRoute Gateway" — live UP/DOWN + combos, auto-open at session restore |
+| Status pane | `scripts/status-dashboard.ps1` + `[[panes]]`/`[[startup]]` | Tab "OmniRoute Gateway" in every workspace — live UP/DOWN + combos, in-place refresh, auto-open at session restore |
 | pi extension | `extensions/omniroute.ts` | `/omniroute` command, footer status, `after_provider_response` warning |
 | Launcher | `omniroute-start.cmd` (user profile) + scheduled task `OmniRouteGateway` | headless `serve --daemon --no-open` at logon, restart-on-failure |
 | OmniRoute gateway | `localhost:20128` (data in `~/.omniroute`) | combos + provider routing; not modified by this repo |
@@ -122,13 +122,16 @@ command = "herdr.omniroute.status"
 
 The plugin declares a `status` pane (placement `tab`) that runs
 `scripts/status-dashboard.ps1`: a live dashboard showing gateway UP/DOWN, the configured
-combos and a refresh timestamp. The `[[startup]]` hook re-opens the tab automatically every
-time Herdr restores the session — the opener is idempotent, so it never duplicates the tab.
+combos and a refresh timestamp. The refresh is **in-place** (cursor home + clear-line, no
+`Clear-Host`), so it never flashes the pane. The `[[startup]]` hook opens the tab in **every
+existing workspace** at session restore — the opener iterates `herdr workspace list`, is
+idempotent per workspace, and never steals focus (`--no-focus`).
 
-- Open it right now (no restart needed):
-  `herdr plugin pane open --plugin herdr.omniroute --entrypoint status`
-- Re-open from the action list: `herdr.omniroute.open-status-pane`.
+- Open/refresh it right now (no restart needed): `herdr plugin action invoke herdr.omniroute.open-status-pane`
+- Refresh delay: `-RefreshSec` (default 8) in `scripts/status-dashboard.ps1`.
 - To stop auto-opening, remove the `[[startup]]` block from `herdr-plugin.toml`.
+- New workspaces created after a session restore won't have the tab until the next restart
+  (plugin v1 binds panes to workspaces; no "workspace created" hook exists).
 
 This is the **reusable pattern** for any future status plugin — full recipe in
 [docs/status-panes.md](docs/status-panes.md).

@@ -73,7 +73,8 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - [x] Acción `herdr.omniroute.open-status-pane`; manifest v0.2.0.
 - [x] `docs/status-panes.md`: patrón reutilizable de status plugins (roadmap: output total entre proyectos; plugins por proyecto irán a pi).
 - [x] Test `-Once` OK: UP + combos `Kimi Coding`/`static-best-coding`. Pane abierto manualmente en la sesión activa.
-- Evidencia: manifest v0.2.0 con panes/startup; test dashboard; pane abierto (pestaña visible).
+- [x] Feedback usuario (15:44): quería el panel en TODOS los workspaces y refresco no brusco. Ajustado: opener itera `herdr workspace list` y abre con `--workspace <id>` `--no-focus` (idempotente por workspace); dashboard pasa de `Clear-Host` a render in-place (`Home` con `[Console]::SetCursorPosition`/fallback ANSI `ESC[H` + `ESC[K` por línea + línea reservada anti-restos + `-RefreshSec` configurable). Verificado: 3 pestañas (w19:t2, w1F:t3, w1G:t2) y segunda pasada → "0 opened, 3 already open".
+- Evidencia: manifest v0.2.0 con panes/startup; test dashboard; pane abierto (pestaña visible en los 3 workspaces).
 
 ### T4 — Configuración de providers/combos en OmniRoute — REQUIERE USUARIO
 - [x] Usuario: abrió dashboard y creó dos combos habilitados — `Kimi Coding` [priority] y `static-best-coding` [weighted] — con providers conectados (gemini/g4f-gemini/uncloseai activos; opencode/OpenCode Free, chipotle, cloudflare-playground, duckduckgo-web, felo-web, aihorde, theoldllm).
@@ -105,6 +106,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - Próximo (en curso): T2+T3 vía writer delegado.
 - 2026-09-25 (15:18): T2 y T3 COMPLETADAS por writer delegado y verificadas por el orquestador (gatekeeper: archivos presentes, link enabled, action status UP, hash repo↔deploy idéntico, keybind añadido). Commits: 804c336 (plugin), 96aad49 (extensión). Riesgos anotados: pi instalado es 0.87.1 (API equivalente); campo `author` no documentado en manifest (Herdr lo ignora); `setStatus/notify` devuelven void (await inofensivo bajo jiti); `herdr plugin action invoke` devuelve `running` (stdout vía `herdr plugin log list`); carga real en sesión pi TTY + tecla `prefix+o` + dashboard end-to-end no verificables aquí.
 - 2026-09-25 (15:38): T2.1 completada (ruta inline: piezas mecánicas derivadas de la doc oficial de panes, sin investigación nueva; verificación local `-Once` imprime UP + combos). Pane `status` (tab) declarado + startup idempotente + acción `open-status-pane`; manifest 0.2.0; `docs/status-panes.md` documenta el patrón reutilizable y la hoja de ruta (output total entre proyectos; plugins por proyecto → pi).
+- 2026-09-25 (15:47): feedback T2.1b — panes por-workspace (plugin v1 no tiene pane global de sesión) → opener multi-workspace (workspace list + pane open --workspace --no-focus, idempotente por workspace) y refresh in-place sin Clear-Host (set cursor position + ESC[K por línea + línea reservada + -RefreshSec). Verificado: 3 pestañas (w19/w1F/w1G), 0 duplicados al repetir. Limitación documentada: workspaces nuevos en sesión activa no reciben el pane hasta reiniciar/acción manual.
 
 ## Next step
 T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) y pruebas del usuario (ver la pestaña "OmniRoute Gateway", `prefix+o`, `/omniroute`, scheduler al reiniciar). Futuro: plugin general de output total entre proyectos siguiendo `docs/status-panes.md`.

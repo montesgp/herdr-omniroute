@@ -47,32 +47,63 @@ command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "s
 El script que corre dentro del pane es un **loop de render**:
 
 ```powershell
-$refreshSec = 8
-function Render { Clear-Host; ... salida con Write-Host y colores ... }
-while ($true) { Render; Start-Sleep -Seconds $refreshSec }
+param([switch]$Once, [int]$RefreshSec = 8)
+$ESC = [char]27   # PS 5.1 no tiene `e ; prepara la secuencia ANSI manualmente
+
+function Home {
+  # Volver arriba SIN borrar el buffer: sobrescribimos en el mismo sitio.
+  try { [Console]::SetCursorPosition(0, 0) } catch { Write-Host "$ESC[H" -NoNewline }
+}
+
+function Render {
+  Home
+  # ... cada línea termina con "$ESC[K" (clear-to-end) para tapar restos de la pasada anterior ...
+  Write-Host ("  Estado: UP" + $ESC + "[K") -ForegroundColor Green
+  # usa SIEMPRE una línea reservada "en blanco" tras el estado y al final:
+  # aspi a altura de salida constante para que DOWN↔UP no dejen restos.
+}
+
+while ($true) { Render; Start-Sleep -Seconds $RefreshSec }
 ```
 
 Reglas útiles:
-- **La salida debe ser legible como texto plano**: PowerShell 5.1 no interpreta ANSI, así que
-  si consultas CLIs con color (p. ej. OmniRoute), limpia los escapes:
+- **NUNCA uses `Clear-Host` en un pane**: borra el buffer entero en cada refresh y se ve como un pantallazo. El refresh suave es "cursor arriba + sobrescribir líneas": `Home` (set cursor position, fallback ANSI `ESC[H`) y cada línea termina con `ESC[K` (clear-to-end-of-line). PowerShell 5.1 no interpreta ANSI por sí mismo, pero la TUI de Herdr sí lo hace, así que las secuencias pasan.
+- **Mantén la altura de salida constante** (reserva una línea en blanco donde el estado DOWN imprime la línea de acción) para que las transiciones UP↔DOWN no dejen texto residual.
+- **La salida debe ser legible como texto plano**: si consultas CLIs con color (p. ej. OmniRoute), limpia los escapes:
   `$s -replace "\x1b\[[0-9;]*m",""`.
 - **Añade un switch `-Once`** para poder testear el render sin entrar en el loop infinito:
   `param([switch]$Once)` + `if ($Once) { Render; exit 0 }`. Así se valida el dashboard desde
   línea de comandos sin colgar el shell.
+- **Haz la frecuencia configurable** con `[int]$RefreshSec = 8` (refresca rápido de 8s sin parpadeo
+  porque reescribe en el mismo sitio).
 - Distingue estados con color (`Green` UP / `Red` DOWN) y muestra la acción de recuperación.
 - Añade un timestamp de "Actualizado" — el pane vive mientras la pestaña está abierta.
 
-## Pieza 3 — Apertura idempotente
+## Pieza 3 — Apertura idempotente Y EN TODOS LOS WORKSPACES
 
-`scripts/open-status-pane.ps1` — usado por startup Y por la acción "open status pane":
+Los panes viven **dentro de un workspace** (plugin v1: no hay pane "global de sesión").
+Para ver el status en todos tus proyectos, el opener itera los workspaces existentes y abre
+la pestaña en cada uno (`--workspace <id>` + `--no-focus` para no robar el foco), comprobando
+por workspace si ya existe antes de abrir:
 
 ```powershell
 $herdr = if ($env:HERDR_BIN_PATH) { $env:HERDR_BIN_PATH } else { "herdr" }
-$existing = (& $herdr pane list 2>$null | Out-String)
-if ($existing -match "<plugin-id>|<pane-title>") { Write-Output "pane already open"; exit 0 }
-& $herdr plugin pane open --plugin <plugin-id> --entrypoint status 2>&1 | Out-String | Write-Output
-exit $LASTEXITCODE
+$label = "OmniRoute Gateway"
+
+$ws = (& $herdr workspace list 2>$null | Out-String | ConvertFrom-Json)
+$panes = (& $herdr pane list 2>$null | Out-String | ConvertFrom-Json)
+$workspaces = @($ws.result.workspaces)
+
+foreach ($w in $workspaces) {
+  $already = @($panes.result.panes | Where-Object { $_.workspace_id -eq $w.workspace_id -and $_.label -eq $label }).Count -gt 0
+  if ($already) { continue }
+  & $herdr plugin pane open --plugin <plugin-id> --entrypoint status --workspace $w.workspace_id --no-focus
+}
 ```
+
+Si `workspace list` falla, el fallback es abrir sin target (workspace activo). El comando pane se
+lanza con el cwd del plugin, no del workspace, así que las rutas relativas del manifest funcionan
+en cualquier workspace.
 
 ## Pieza 4 — Auto-apertura al arrancar
 
@@ -82,12 +113,16 @@ command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "s
 ```
 
 El startup hook corre **una vez por plugin al restaurar la sesión** de Herdr (no en cada attach
-ni reload de config). El script idempotente evita duplicar pestañas. Para desactivar la
-auto-apertura de un plugin: borra su bloque `[[startup]]`.
+ni reload de config). Como el opener itera los workspaces, la auto-apertura cubre todos los
+workspaces existentes en ese momento. Para desactivar la auto-apertura de un plugin: borra su
+bloque `[[startup]]`.
 
-> Nota: los cambios de manifest de *panes/acciones* se leen al invocarlos; el bloque `[[startup]]`
-> requiere el próximo arranque/restauración de sesión. Si quieres el pane YA sin reiniciar, abre
-> manualmente: `herdr plugin pane open --plugin <id> --entrypoint status`.
+> Nota 1: los cambios de manifest de *panes/acciones* se leen al invocarlos; el bloque `[[startup]]`
+> requiere el próximo arranque/restauración de sesión. Si quieres los panes YA sin reiniciar, abre
+> manualmente el opener (o la acción `open-status-pane`).
+> Nota 2: los workspaces **creados después** del arranque no reciben el pane hasta el próximo
+> reinicio de Herdr o una invocación manual del opener. Es una limitación de plugin v1 (los panes
+> son por-workspace y no hay hook de "workspace creado").
 
 ## Hacer tu propio status plugin (checklist)
 
