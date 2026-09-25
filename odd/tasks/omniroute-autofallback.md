@@ -46,22 +46,24 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - [ ] Verificación futura: reinicio/re-logon para confirmar daemon + no-browser.
 - Evidencia: netstat :20128 LISTENING; status CLI OK.
 
-### T2 — Plugin Herdr `herdr-omniroute` (repo nuevo) — PENDING
-- [ ] Crear repo `C:\repositories\personal\herdr-omniroute` (branch feat/omniroute-autofallback) con README, .gitignore.
-- [ ] `herdr-plugin.toml`: id `herdr.omniroute`, name "OmniRoute Gateway", min_herdr_version 0.7.0, platforms windows; [[actions]] status/start/dashboard; [[keys.command]] prefix+o → status.
-- [ ] `scripts/status.ps1`: chequea puerto 20128 + `omniroute status` resumido, exit code indicativo.
-- [ ] `scripts/start.ps1`: si puerto libre, lanza `node mjs serve --daemon --no-open`.
-- [ ] `scripts/dashboard.ps1`: abre http://localhost:20128.
-- [ ] `herdr plugin link` + `herdr plugin action invoke herdr.omniroute.status` de prueba.
-- [ ] Push a GitHub `montesgp/herdr-omniroute` (topic `herdr-plugin`).
+### T2 — Plugin Herdr `herdr-omniroute` (repo nuevo) — DONE ✅
+- [x] Repo creado (T1, branch feat/omniroute-autofallback) + README (T2). `.gitignore` pendiente (opcional).
+- [x] `herdr-plugin.toml` (manifest validado contra plugins.mdx; 3 acciones).
+- [x] `scripts/status.ps1`: netstat :20128 → UP/DOWN + exit code.
+- [x] `scripts/start.ps1`: si puerto libre, lanza `node mjs serve --daemon --no-open`.
+- [x] `scripts/dashboard.ps1`: abre http://localhost:20128.
+- [x] `herdr plugin link` + `herdr plugin action invoke herdr.omniroute.status` OK (UP, exit 0) y `start` OK (already UP).
+- [ ] Push a GitHub `montesgp/herdr-omniroute` (topic `herdr-plugin`) — PENDIENTE decisión del usuario (entrega).
+- Commit: `804c336 feat(plugin): add herdr-omniroute status/start/dashboard actions`
 
-### T3 — Extensión pi `omniroute.ts` — PENDING
-- [ ] `~/.pi/agent/extensions/omniroute.ts` (default factory ExtensionAPI).
-- [ ] `pi.registerCommand("omniroute", ...)`: `status` (●/○, provider activo si disponible), `start`, `dashboard`.
-- [ ] `setStatus("omniroute", "●"/"○")` en footer tras session_start (chequeo de puerto).
-- [ ] `pi.on("after_provider_response")`: si status >= 400 → `ctx.ui.notify` warn (gateway caído o provider agotado sin respaldo).
-- [ ] Verificar en probe (T4) si OmniRoute añade headers de fallback (x-omniroute-*) para aviso "se usó respaldo"; si no, el aviso queda limitado a estado del gateway (documentar).
-- [ ] Carga con pi (jiti, sin compilación): `pi --extension` de prueba.
+### T3 — Extensión pi `omniroute.ts` — DONE ✅
+- [x] Fuente canónica en repo `extensions/omniroute.ts` + deploy `~/.pi/agent/extensions/omniroute.ts` (hash idéntico).
+- [x] `pi.registerCommand("omniroute", ...)`: `status` (●/○), `start`, `dashboard`.
+- [x] `setStatus("omniroute", "●"/"○")` en footer tras `session_start`.
+- [x] `pi.on("after_provider_response")`: status >= 400 → `ctx.ui.notify` warn.
+- [ ] Verificar en probe (T4b) si OmniRoute añade headers de fallback (x-omniroute-*) para aviso "se usó respaldo"; si no, el aviso queda limitado a estado del gateway (documentar).
+- [x] Carga validada: `EXT OK true` (node strip-types ESM) + smoke test (sesión_start → ●, 500 → warn, 200 silencioso, `/omniroute status` → UP).
+- Commit: `96aad49 feat(extension): add pi /omniroute gateway status extension`. Nota: pi real instalado es 0.87.1 (equivalente a 0.86.1 verificado en types).
 
 ### T4 — Configuración de providers/combos en OmniRoute — REQUIERE USUARIO
 - [x] Usuario: abrió dashboard y creó dos combos habilitados — `Kimi Coding` [priority] y `static-best-coding` [weighted] — con providers conectados (gemini/g4f-gemini/uncloseai activos; opencode/OpenCode Free, chipotle, cloudflare-playground, duckduckgo-web, felo-web, aihorde, theoldllm).
@@ -91,6 +93,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - 2026-09-25: T1 completada. Gateway corriendo en :20128 (arranque manual con entry node). Task `OmniRouteGateway` Ready con `serve --daemon --no-open`. Repo creado (git init, branch feat/omniroute-autofallback). Descubrimiento: OmniRoute escribe `~/.omniroute` (storage.sqlite 1.6MB, .env STORAGE_ENCRYPTION_KEY) — NO mostrar valores de .env; `server-ws.mjs` es el worker del serve. Config Dir NOT found → T4 pendiente de primera configuración.
 - 2026-09-25 (14:50): combos creados por usuario: `Kimi Coding` [priority], `static-best-coding` [weighted]; `omniroute combo switch <name>` cambia el activo. T4a (providers+combos) lista; falta probe /v1 + provider custom en pi (T4b).
 - Próximo (en curso): T2+T3 vía writer delegado.
+- 2026-09-25 (15:18): T2 y T3 COMPLETADAS por writer delegado y verificadas por el orquestador (gatekeeper: archivos presentes, link enabled, action status UP, hash repo↔deploy idéntico, keybind añadido). Commits: 804c336 (plugin), 96aad49 (extensión). Riesgos anotados: pi instalado es 0.87.1 (API equivalente); campo `author` no documentado en manifest (Herdr lo ignora); `setStatus/notify` devuelven void (await inofensivo bajo jiti); `herdr plugin action invoke` devuelve `running` (stdout vía `herdr plugin log list`); carga real en sesión pi TTY + tecla `prefix+o` + dashboard end-to-end no verificables aquí.
 
 ## Next step
-T2+T3 en ejecución por writer delegado (ruta directa delegada: archivos mecánicos ya especificados por el orquestador); gatekeeper verifica al retorno; luego T4b (probe + provider custom pi) con el usuario.
+T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) con el usuario; push `montesgp/herdr-omniroute` cuando el usuario lo apruebe; `.gitignore` opcional.
