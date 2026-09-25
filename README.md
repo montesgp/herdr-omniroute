@@ -1,8 +1,76 @@
 # herdr-omniroute
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Status, start and dashboard actions for the [OmniRoute](https://github.com/montesgp/omniroute)
 auto-fallback gateway, which listens on `localhost:20128` and routes agent traffic
-to a combo of providers so an exhausted token never kills a session.
+to a combo of providers so an exhausted token never kills a session. Plus a pi
+extension that surfaces gateway state and warns after a failed call.
+
+> This repo is the **thin control layer** — the gateway itself is not here.
+> Providers, combos and tokens stay in OmniRoute's own storage and user config,
+> so tool updates never break these files.
+
+## Architecture (where this sits)
+
+```mermaid
+flowchart LR
+  subgraph HERDR["Herdr — multiplexor de sesiones"]
+    direction TB
+    S["Sesiones de agentes"]
+    P["herdr-omniroute plugin<br/>(status · start · dashboard — prefix+o)"]
+  end
+  subgraph AGENTES["Agentes (clientes OpenAI-compatible)"]
+    direction TB
+    PI["pi / gentle-shell"]
+    CC["Claude Code"]
+    CX["Codex CLI"]
+  end
+  subgraph GW["OmniRoute gateway — localhost:20128"]
+    direction TB
+    C1["Combo Kimi Coding [priority]"]
+    C2["Combo static-best-coding [weighted]"]
+  end
+  subgraph PROV["Providers"]
+    direction TB
+    G["gemini · g4f-gemini"]
+    K["kimi · OpenCode Free"]
+    U["uncloseai · otros free"]
+  end
+  subgraph INFRA["Windows — scheduled task OmniRouteGateway"]
+    direction TB
+    T["omniroute serve --daemon --no-open<br/>(headless, restart-on-failure)"]
+  end
+
+  PI -->|"POST /v1"| GW
+  CC -->|"POST /v1"| GW
+  CX -->|"POST /v1"| GW
+  GW -->|"fallback en orden del combo"| G
+  GW -->|"fallback"| K
+  GW -->|"fallback"| U
+  S --> P
+  P -.->|"scripts status/start"| INFRA
+  INFRA -.->|"mantiene vivo"| GW
+  PI -.->|"omniroute.ts: /omniroute · footer · notify post-call"| P
+```
+
+**How it works**
+
+1. Any OpenAI-compatible agent (pi, Claude Code, Codex CLI) calls `http://localhost:20128/v1`.
+2. OmniRoute picks the active combo — `Kimi Coding [priority]` or `static-best-coding [weighted]`.
+3. The combo serves providers in order/weight; when one is exhausted (429/5xx), the next one answers the same request. The agent never sees the failure.
+4. Herdr sessions can check/start/open the gateway via the plugin actions or `prefix+o`; pi shows a footer dot (`●`/`○`) and warns on non-2xx post-call responses.
+
+Full layered description: [docs/architecture.md](docs/architecture.md).
+
+## Components
+
+| Component | Location | Role |
+| --- | --- | --- |
+| Herdr plugin | `herdr-plugin.toml` + `scripts/*.ps1` | `status` / `start` / `dashboard` workspace actions |
+| pi extension | `extensions/omniroute.ts` | `/omniroute` command, footer status, `after_provider_response` warning |
+| Launcher | `omniroute-start.cmd` (user profile) + scheduled task `OmniRouteGateway` | headless `serve --daemon --no-open` at logon, restart-on-failure |
+| OmniRoute gateway | `localhost:20128` (data in `~/.omniroute`) | combos + provider routing; not modified by this repo |
 
 ## Install
 
@@ -12,10 +80,16 @@ Local development (link the working directory):
 herdr plugin link C:\repositories\personal\herdr-omniroute
 ```
 
-Once published on GitHub:
+From GitHub:
 
 ```bash
 herdr plugin install montesgp/herdr-omniroute
+```
+
+pi extension (deploy after pulling this repo):
+
+```bash
+copy extensions\omniroute.ts %USERPROFILE%\.pi\agent\extensions\omniroute.ts
 ```
 
 Linking and installing both work without a running Herdr server.
@@ -55,8 +129,22 @@ command = "herdr.omniroute.status"
   here writes into a tool's install directory, so plugin or agent updates do not
   break it.
 
+## Branches
+
+Simple promotion flow — everything converges on `main`:
+
+| Branch | Purpose |
+| --- | --- |
+| `dev` | Active development |
+| `staging` | Pre-release testing |
+| `main` | Stable release |
+
 ## Requirements
 
 - Windows
 - Herdr 0.7.0 or newer
 - OmniRoute reachable at `http://localhost:20128` (see the scheduled task above)
+
+## License
+
+[MIT](LICENSE) © 2026 montesgp
