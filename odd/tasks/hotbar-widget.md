@@ -207,5 +207,5 @@ un ítem o cambiar su acción no requiere tocar código.
   multi-monitor. Fix: chevrones por dirección de movimiento (collapse `›`, expand `‹`), drag
   libre con `DragMove()` en espacio vacío de la barra, snap al borde derecho del monitor bajo
   el centro al soltar, persistencia de `monitor` en config.json. Botón collapse ampliado al
-  doble (56x36, fuente 24). Verificación pendiente: selftest, E2E visual del usuario
-  (arrastrar al monitor derecho).
+  doble (56x36, fuente 24). Verificación: selftest PASS 1.4s, widget relanzado (pid 17244).
+  Evidencia: commit `318aa61`.
