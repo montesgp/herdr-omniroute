@@ -5,7 +5,8 @@
 Status, start and dashboard actions for the [OmniRoute](https://github.com/montesgp/omniroute)
 auto-fallback gateway, which listens on `localhost:20128` and routes agent traffic
 to a combo of providers so an exhausted token never kills a session. Plus a pi
-extension that surfaces gateway state and warns after a failed call.
+extension that surfaces gateway state and warns after a failed call, and the
+**Herdr Hub** — a thin multi-widget dock anchored to the right of a workspace.
 
 > This repo is the **thin control layer** — the gateway itself is not here.
 > Providers, combos and tokens stay in OmniRoute's own storage and user config,
@@ -18,7 +19,7 @@ flowchart LR
   subgraph HERDR["Herdr — multiplexor de sesiones"]
     direction TB
     S["Sesiones de agentes"]
-    P["herdr-omniroute plugin<br/>(status · start · dashboard · popup status — prefix+o)"]
+    P["herdr-omniroute plugin<br/>(status · start · dashboard · popup status — prefix+o · hub dock)"]
   end
   subgraph AGENTES["Agentes (clientes OpenAI-compatible)"]
     direction TB
@@ -67,9 +68,10 @@ Full layered description: [docs/architecture.md](docs/architecture.md).
 
 | Component | Location | Role |
 | --- | --- | --- |
-| Herdr plugin | `herdr-plugin.toml` + `scripts/*.ps1` | `status` / `start` / `dashboard` / `open-status-pane` workspace actions |
+| Herdr plugin | `herdr-plugin.toml` + `scripts/*.ps1` | `status` / `start` / `dashboard` / `open-status-pane` / `hub` workspace actions |
 | Status popup | `scripts/status-dashboard.ps1` + `[[panes]]` | On-demand popup "OmniRoute Gateway" — one snapshot of UP/DOWN + combos at open time, no auto refresh, closes on `q` or Enter; no auto-open |
 | Popup opener | `scripts/open-status-pane.ps1` | Single windowless `plugin pane open` call for the popup (a popup is a session singleton, so no pane probing) |
+| Herdr Hub | `scripts/hub/*` | Thin dock pane on the right of a workspace: one icon per widget, expand with `1`-`3`, `q`/`Esc` closes it. Idempotent per workspace. [docs/hub.md](docs/hub.md) |
 | pi extension | `extensions/omniroute.ts` | `/omniroute` command, footer status, `after_provider_response` warning |
 | Launcher | `omniroute-start.cmd` (user profile) + scheduled task `OmniRouteGateway` | headless `serve --daemon --no-open` at logon, restart-on-failure |
 | OmniRoute gateway | `localhost:20128` (data in `~/.omniroute`) | combos + provider routing; not modified by this repo |
@@ -104,6 +106,7 @@ Linking and installing both work without a running Herdr server.
 | `herdr.omniroute.start` | `scripts/start.ps1` | No-op when the gateway is already up; otherwise launches `omniroute serve --daemon --no-open`. |
 | `herdr.omniroute.dashboard` | `scripts/dashboard.ps1` | Opens `http://localhost:20128` in the default browser. |
 | `herdr.omniroute.open-status-pane` | `scripts/open-status-pane.ps1` | Opens the single status popup. If another Herdr modal is active it says so and exits 0. |
+| `herdr.omniroute.hub` | `scripts/hub/open-hub.ps1` | Opens the Herdr Hub dock (~37 cols, right of the current workspace) or says it is already open. `q`/`Esc` closes it. [docs/hub.md](docs/hub.md) |
 
 Actions are declared for the `workspace` context, so they show up in a workspace's
 action list.
@@ -210,6 +213,30 @@ cannot.
 This is the **reusable pattern** for any future status plugin — full recipe in
 [docs/status-panes.md](docs/status-panes.md).
 
+## Herdr Hub dock
+
+The hub is the plugin's persistent surface: a ~37 column pane split off the right
+of the current workspace, showing one icon per widget.
+
+```text
+[HUB] 1 ◉  2 Σ  3 ⚙
+1-3 expande · q cierra
+```
+
+- Open it: `herdr plugin action invoke herdr.omniroute.hub` (or bind a key to it).
+- Expand: `1` OmniRoute, `2` Tokens, `3` Config. The same key again collapses.
+- Close: `q`, `Q` or `Escape`. The hub closes its own pane, which restores the layout.
+- Idempotent: a second invocation reports the existing pane and touches nothing.
+- Collapsed, the strip never repaints. Expanded, it repaints every 15 s
+  (`-RefreshSec`), and `-MaxSeconds` (default 1800) is a hard cap in every path.
+- **Adding a widget is a module plus one registry line**: create
+  `scripts/hub/widgets/<id>.ps1` exporting `Get-Widget<Id>`, then add
+  `@{ Id = "..."; Key = "4"; Icon = ...; Title = "..." }` to `scripts/hub/widgets.ps1`.
+  The `Tokens` stub is the worked example.
+
+Everything is documented in [docs/hub.md](docs/hub.md): the widget contract, the
+split mechanics, where each fact comes from and the troubleshooting table.
+
 ## Scope and lifetime
 
 - **User-global by design.** Herdr plugins are per-user, not per-project: once linked
@@ -219,6 +246,10 @@ This is the **reusable pattern** for any future status plugin — full recipe in
   1-minute interval on failure, and has no execution time limit. No browser opens.
 - **The status popup is on demand and short-lived.** It never opens on session
   restore, closes on `q` or Enter, and is capped at `-MaxSeconds`.
+- **The hub dock is on demand and bounded too.** It is created by an explicit
+  action, lives in one workspace, and closes itself on `q`/`Escape` or at
+  `-MaxSeconds`. There is no `[[startup]]` hook, so restoring a session never
+  opens a dock.
 - **Personalization lives only in user files.** This repo holds the plugin scripts
   and a pi extension; provider, combo and token configuration stays in
   OmniRoute's own storage and in the user's Herdr/pi config directories. Nothing

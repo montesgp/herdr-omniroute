@@ -14,7 +14,7 @@ flowchart LR
   subgraph HERDR["Herdr — multiplexor de sesiones"]
     direction TB
     S["Sesiones de agentes"]
-    P["herdr-omniroute plugin<br/>(status · start · dashboard · popup status — prefix+o)"]
+    P["herdr-omniroute plugin<br/>(status · start · dashboard · popup status — prefix+o · hub dock)"]
   end
   subgraph AGENTES["Agentes (clientes OpenAI-compatible)"]
     direction TB
@@ -54,7 +54,7 @@ flowchart LR
 
 | Layer | Component | Responsibility |
 | --- | --- | --- |
-| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: on-demand status popup (one snapshot of UP/DOWN + combos), status dot, actions, `/omniroute` |
+| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: on-demand status popup (one snapshot of UP/DOWN + combos), the hub dock (multi-widget strip, expandable), status dot, actions, `/omniroute` |
 | 1 — Agentes | pi, Claude Code, Codex CLI | Arbitrary OpenAI-compatible clients that POST to `:20128/v1` |
 | 2 — Gateway | OmniRoute (`localhost:20128`) | Single entry point; owns combos and provider routing |
 | 3 — Providers | gemini, kimi, OpenCode Free, uncloseai, ... | Real backends; exhausted/slow ones are bypassed by the combo |
@@ -75,6 +75,12 @@ flowchart LR
    - Herdr plugin reports UP/DOWN and can (re)start the daemon (`prefix+o`).
      The detail is an on-demand popup showing one snapshot taken at open time
      (no auto refresh, closes on `q` or Enter), never an auto-opened surface.
+   - The **hub dock** is the persistent surface: a ~37 column pane split off the
+     right of the current workspace, holding one widget per entry in the registry
+     (`scripts/hub/widgets.ps1`). The OmniRoute widget reads the same two sources
+     as the popup — the port check and the read-only SQLite query — plus
+     `GET /api/settings` for the active combo, authenticated with the
+     machine-derived CLI token, never with the gateway API key.
    - pi extension shows a footer status (`●`/`○`) and warns on non-2xx
      `after_provider_response`.
 
@@ -115,18 +121,26 @@ read must not look like "no combos configured".
 
 | Path | Purpose |
 | --- | --- |
-| `herdr-plugin.toml` | Herdr plugin manifest (4 workspace actions, 1 status popup, no startup hook) |
+| `herdr-plugin.toml` | Herdr plugin manifest (5 workspace actions, 1 status popup, no startup hook) |
 | `scripts/status.ps1` | Port 20128 check; exit 0 = up, 1 = down |
 | `scripts/start.ps1` | No-op if up; else `serve --daemon --no-open` |
 | `scripts/dashboard.ps1` | Opens `http://localhost:20128` |
 | `scripts/lib/Invoke-Native.ps1` | Windowless external-command helper (`CreateNoWindow`) shared by the scripts. `Start-NativeProcess` / `Complete-NativeProcess` are split so two calls can be in flight at once |
 | `scripts/lib/Read-SqliteQuery.ps1` | Read-only SQLite query: `sqlite3.exe` first, P/Invoke over `winsqlite3.dll` as fallback |
-| `scripts/lib/Get-OmniRouteCombos.ps1` | Resolves OmniRoute's `storage.sqlite` and maps the combos table into the frame's fields |
+| `scripts/lib/Get-OmniRouteCombos.ps1` | Resolves OmniRoute's `storage.sqlite` and maps the combos table into the frame's fields. Shared by the popup and the hub widget |
 | `scripts/status-dashboard.ps1` | Single-snapshot frame for the status popup: reads SQLite and checks the port in parallel, paints once, never repaints, then waits for `q`/Enter (`-MaxSeconds` cap, `-Once` test switch) |
 | `scripts/open-status-pane.ps1` | Opens the single status popup (one `plugin pane open` call, no pane probing) |
+| `scripts/hub/widgets.ps1` | Hub widget registry: the strip, the key map and the widget order. One line per widget |
+| `scripts/hub/index.ps1` | The dock itself: in-place render, key loop, expand/collapse, auto-close of its own pane |
+| `scripts/hub/widgets/omniroute.ps1` | Hub widget: port check, active combo via the machine token, combo list via `Get-OmniRouteCombos.ps1` |
+| `scripts/hub/widgets/tokens.ps1` | Hub widget stub: token totals, source still undecided (H4) |
+| `scripts/hub/widgets/config.ps1` | Hub widget stub: configuration actions, not built yet |
+| `scripts/hub/open-hub.ps1` | Idempotent dock opener: title-marker check, largest-pane split, `pane run`, self-cleanup on failure |
 | `docs/status-panes.md` | Reusable pattern for future status plugins |
+| `docs/hub.md` | Hub guide: widget contract, dock mechanics, data sources, troubleshooting |
 | `extensions/omniroute.ts` | pi extension source (deployed to `~/.pi/agent/extensions/`) |
 | `odd/tasks/omniroute-autofallback.md` | Feature tracker (ODD) — evidence of what was built and verified |
+| `odd/tasks/herdr-hub.md` | Hub feature tracker (ODD) — H1 spike done, H2/H3/H5 implemented, H4 open |
 
 ## Branching
 

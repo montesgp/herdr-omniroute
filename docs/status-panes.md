@@ -3,6 +3,12 @@
 > "Quiero una sección o panel en Herdr para seguir implementando este tipo de status plugins."
 > Este documento es la plantilla de referencia. `herdr-omniroute` es su primer caso real.
 
+> Este documento cubre el patrón **popup** (modal de sesión, una foto, cierre con
+> `q`/Enter). El mismo repo tiene un segundo patrón: el **dock** del
+> [Herdr Hub](hub.md), un split delgado a la derecha que permanece visible, con
+> varios widgets ampliables. Popup para el detalle puntual; dock para lo que se mira
+> mientras se trabaja.
+
 ## Qué es un status pane
 
 Herdr plugin v1 **no tiene UI nativa de plugins** (sin panel gráfico propio), PERO tiene

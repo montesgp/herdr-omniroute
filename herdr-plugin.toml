@@ -1,7 +1,7 @@
 id = "herdr.omniroute"
 name = "OmniRoute Gateway"
-version = "0.3.0"
-description = "Status, start and dashboard for the OmniRoute auto-fallback gateway (localhost:20128)"
+version = "0.4.0"
+description = "Status, start, dashboard and the multi-widget hub dock for the OmniRoute auto-fallback gateway (localhost:20128)"
 author = "montesgp"
 platforms = ["windows"]
 min_herdr_version = "0.7.0"
@@ -29,6 +29,12 @@ id = "open-status-pane"
 title = "OmniRoute: open status popup"
 contexts = ["workspace"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/open-status-pane.ps1"]
+
+[[actions]]
+id = "hub"
+title = "Herdr Hub: open dock"
+contexts = ["workspace"]
+command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/hub/open-hub.ps1"]
 
 [[panes]]
 id = "status"
