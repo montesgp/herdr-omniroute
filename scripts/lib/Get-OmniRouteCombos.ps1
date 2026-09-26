@@ -25,7 +25,7 @@
   IMPORTANT SOURCING NOTE: the gateway keeps activeCombo in runtime memory and only
   persists it to key_value if a user ever saves it as a setting. In the install this
   reader targets, key_value has NO activeCombo key, so ActiveComboName is empty and a
-  caller must NOT render ●/○ as if it knew. The live value is only reachable through
+  caller must NOT render U+25CF/U+25CB as if it knew. The live value is only reachable through
   GET /api/settings, which requires gateway auth (this install: 401 without a key).
 
   Dot-source it, do not run it:

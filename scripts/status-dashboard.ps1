@@ -56,8 +56,8 @@ try {
 
 $Port = 20128
 $ESC = [char]27
-$IconActive = [char]0x25CF      # ●
-$IconInactive = [char]0x25CB    # ○
+$IconActive = [char]0x25CF      # filled dot
+$IconInactive = [char]0x25CB    # hollow dot
 $NetstatTimeoutMs = 5000
 
 # Paths are joined with [System.IO.Path]::Combine rather than Join-Path throughout this
@@ -114,7 +114,7 @@ function Get-ComboLines($Job) {
 
   $lines = @()
   # The gateway keeps activeCombo in runtime memory and key_value usually has no such
-  # key (this install: none). Rendering ○ would claim a definite answer we do not have,
+  # key (this install: none). Rendering U+25CB would claim a definite answer we do not have,
   # so icons only appear when the reader actually found the setting.
   $activeKnown = $read.ActiveComboName -ne ""
   foreach ($c in $read.Combos) {

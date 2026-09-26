@@ -1,7 +1,7 @@
 id = "herdr.omniroute"
 name = "OmniRoute Gateway"
-version = "0.5.0"
-description = "Status, start, dashboard and the on-demand Herdr Hub menu for the OmniRoute auto-fallback gateway (localhost:20128)"
+version = "0.6.0"
+description = "Status, start and dashboard for the OmniRoute auto-fallback gateway (localhost:20128). The floating hotbar widget in hotbar/ is standalone and is not registered here."
 author = "montesgp"
 platforms = ["windows"]
 min_herdr_version = "0.7.0"
@@ -30,12 +30,6 @@ title = "OmniRoute: open status popup"
 contexts = ["workspace"]
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/open-status-pane.ps1"]
 
-[[actions]]
-id = "menu"
-title = "Herdr Hub: menu"
-contexts = ["workspace"]
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/menu/open-menu.ps1"]
-
 [[panes]]
 id = "status"
 title = "OmniRoute Gateway"
@@ -43,15 +37,3 @@ placement = "popup"
 width = "60%"
 height = 14
 command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/status-dashboard.ps1"]
-
-[[panes]]
-id = "menu"
-title = "Herdr Hub"
-placement = "popup"
-# Numbers are outer terminal-cell dimensions, per the Herdr plugin manifest. 35 is
-# one column wider than the 34 the menu draws, so a full-width frame never leaves
-# the terminal in the pending auto-wrap state. The popup minimum clamps anything
-# below it, so the E2E is what confirms 35x10 renders unscaled.
-width = 35
-height = 10
-command = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/menu/menu.ps1"]
