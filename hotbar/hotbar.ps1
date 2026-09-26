@@ -1,0 +1,1178 @@
+<#
+.SYNOPSIS
+  hotbar - a floating, always-on-top Windows bar built with PowerShell and WPF.
+
+.DESCRIPTION
+  A half-moon shaped widget that lives above every window (including the terminal),
+  pinned to the right edge of a monitor and centred vertically. macOS-dock-like:
+  a vertical column of round glyph buttons, dark glass, gold on hover, no frame, no
+  taskbar entry.
+
+  Everything visible comes from hotbar/config.json. Items are generated at startup
+  from a loop, so adding or reordering an entry is a JSON edit, never a code change.
+  Each item carries an `action`:
+
+    none              do nothing (the tooltip explains how to wire it up)
+    omniroute-status  toggle the inline OmniRoute panel (UP/DOWN + combos)
+    run:<command>     run a command windowlessly
+    edit-config       open config.json in the editor
+
+  Design notes that are not obvious from the code:
+
+  * STA is required before any window exists. WPF refuses to create a window on an
+    MTA thread, and the apartment state of the current thread cannot be changed from
+    inside it. If this script is not already on an STA thread it re-launches itself
+    with -STA once, and forwards the child's exit code.
+  * The XAML is a single-quoted here-string. A double-quoted one would let
+    PowerShell expand `$` inside the markup and corrupt it.
+  * No glyph is ever typed literally into this file. The .ps1 files are pure ASCII
+    so the bytes survive any editor, diff and code page; glyphs come from config as
+    0xNNNN strings converted with [char], and the two chevrons baked into the XAML
+    use XML numeric entities (&#x2039; / &#x203A;).
+  * The data readers live in hotbar/lib as dot-sourced copies, so the widget is
+    standalone: it never reaches into the Herdr plugin's script tree.
+  * Screen geometry is converted from physical pixels to device-independent units
+    before it reaches Window.Left/Top. WinForms reports pixels and WPF positions in
+    DIUs, so on a scaled display the two disagree by exactly the scale factor.
+
+.PARAMETER SelfTest
+  Validate the widget without a human: parses the XAML, loads the config, computes
+  both positions, exercises the inline panel data read, opens the window for ~700 ms
+  and closes it again. Prints HOTBAR_SELFTEST PASS and exits 0, or prints the
+  failures and exits 1. It always terminates: the window is closed by a
+  DispatcherTimer, with a background watchdog behind it in case the timer never
+  fires. SelfTest deliberately skips the single-instance check, so it can always be
+  run while a live bar is on screen.
+
+.EXAMPLE
+  .\hotbar.ps1
+  Runs the bar. Right-click it for the menu, Escape also quits.
+
+.EXAMPLE
+  .\hotbar.ps1 -SelfTest
+  Headless-ish verification. Flashes a window for under a second.
+#>
+[CmdletBinding()]
+param(
+  [switch]$SelfTest,
+  [int]$SelfTestMs = 700
+)
+
+$ErrorActionPreference = "Stop"
+
+# ---------------------------------------------------------------------------
+# Constants. Sizes are device-independent units (what WPF calls a DIP); only the
+# screen rectangle is converted from pixels (see Get-HotbarDpiScale).
+# ---------------------------------------------------------------------------
+$script:HotbarMutexName = "Local\herdr.hotbar.widget.v1"
+$script:BarWidth = 72
+$script:BarHeight = 400
+$script:PanelWidth = 320
+$script:CollapsedSize = 46
+$script:DefaultMargin = 8
+$script:MaxPanelChars = 38
+$script:GlyphFont = "Segoe UI Symbol, Segoe MDL2 Assets, Segoe UI"
+$script:PanelFont = "Consolas, Courier New"
+$script:PanelFontSize = 10.0
+
+# Colours. Dark glass body, gold accent on hover, honest red/green for the gateway.
+$script:ColorText = "#C8C8D4"
+$script:ColorDim = "#8A8A96"
+$script:ColorGold = "#E8C46A"
+$script:ColorUp = "#6FCF6F"
+$script:ColorDown = "#E06C6C"
+$script:ColorWarn = "#E8B04A"
+
+# The hotbar folder's parent is the repository root, which is the default working
+# directory for a `run:` action. Paths are combined with [System.IO.Path]::Combine
+# on purpose: the first Join-Path in a process autoloads
+# Microsoft.PowerShell.Management, which costs about 95 ms before the window even
+# appears. Do not "tidy" these back into Join-Path.
+$script:HotbarRoot = $PSScriptRoot
+$script:RepoRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($PSScriptRoot, ".."))
+$script:ConfigPath = [System.IO.Path]::Combine($PSScriptRoot, "config.json")
+
+# Actions the widget understands. Anything else is treated as a no-op: an
+# unrecognised action must never look like a successful one.
+$script:KnownActions = @("none", "omniroute-status", "edit-config")
+
+# Live state, filled in by Read-HotbarConfig and New-HotbarWindow.
+$script:Config = $null
+$script:Margin = $script:DefaultMargin
+$script:Collapsed = $false
+$script:PanelOpen = $false
+$script:Window = $null
+
+# ---------------------------------------------------------------------------
+# Apartment state. Must happen before Add-Type PresentationFramework or any
+# Window is created: WPF cannot create a window on an MTA thread, and a thread
+# cannot change its own apartment state.
+# ---------------------------------------------------------------------------
+function Invoke-HotbarSelfRelaunchOnSta {
+  $host32 = [System.IO.Path]::Combine($env:SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+  if (-not [System.IO.File]::Exists($host32)) { $host32 = "powershell.exe" }
+
+  $self = ('"{0}"' -f $PSCommandPath)
+  $args = @("-NoProfile", "-STA", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $self)
+
+  $child = Start-Process -FilePath $host32 -ArgumentList $args -WindowStyle Hidden -PassThru -Wait
+  if ($null -eq $child) { return 1 }
+  return $child.ExitCode
+}
+
+if ([System.Threading.Thread]::CurrentThread.ApartmentState -ne [System.Threading.ApartmentState]::STA) {
+  if ($SelfTest) {
+    Write-Output ("HOTBAR_SELFTEST FAIL: current thread is {0}; WPF needs STA. Run with: powershell -STA -File hotbar.ps1 -SelfTest" -f [System.Threading.Thread]::CurrentThread.ApartmentState)
+    exit 1
+  }
+  # Re-launch once under -STA and behave exactly like that process.
+  exit (Invoke-HotbarSelfRelaunchOnSta)
+}
+
+# ---------------------------------------------------------------------------
+# Assemblies. PresentationFramework/PresentationCore/WindowsBase are WPF proper;
+# System.Windows.Forms is used for one thing only - Screen.WorkingArea, which is
+# the reliable way to ask for the usable area of a monitor - and System.Drawing for
+# the DPI probe. No NuGet, no packages, nothing to install.
+# ---------------------------------------------------------------------------
+foreach ($assembly in @("PresentationFramework", "PresentationCore", "WindowsBase", "System.Windows.Forms", "System.Drawing")) {
+  Add-Type -AssemblyName $assembly
+}
+
+# The data readers are dot-sourced at SCRIPT scope on purpose. Read-SqliteQuery is
+# only checked for existence here: Get-OmniRouteCombos dot-sources it itself, and
+# loading it twice would re-parse 13 KB for nothing.
+$script:LibRoot = [System.IO.Path]::Combine($PSScriptRoot, "lib")
+foreach ($needed in @("Invoke-Native.ps1", "Get-OmniRouteStatus.ps1", "Get-OmniRouteCombos.ps1", "Read-SqliteQuery.ps1")) {
+  $path = [System.IO.Path]::Combine($script:LibRoot, $needed)
+  if (-not [System.IO.File]::Exists($path)) {
+    Write-Output ("hotbar: missing data helper " + $path)
+    exit 1
+  }
+}
+. ([System.IO.Path]::Combine($script:LibRoot, "Invoke-Native.ps1"))
+. ([System.IO.Path]::Combine($script:LibRoot, "Get-OmniRouteStatus.ps1"))
+. ([System.IO.Path]::Combine($script:LibRoot, "Get-OmniRouteCombos.ps1"))
+
+# ---------------------------------------------------------------------------
+# The window markup. Single-quoted here-string: no PowerShell expansion touches it.
+# x:Class is deliberately absent - this is loose XAML parsed by XamlReader, which has
+# no code-behind to resolve a class against.
+# ---------------------------------------------------------------------------
+$script:HotbarXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="hotbar"
+        Width="72"
+        Height="400"
+        WindowStartupLocation="Manual"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        ShowActivated="False"
+        Topmost="True">
+  <Window.Resources>
+    <LinearGradientBrush x:Key="BarFill" StartPoint="0,0" EndPoint="0,1">
+      <GradientStop Offset="0.0" Color="#232329" />
+      <GradientStop Offset="1.0" Color="#101014" />
+    </LinearGradientBrush>
+    <SolidColorBrush x:Key="BarStroke" Color="#3A3A44" />
+
+    <Style x:Key="ItemButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#C8C8D4" />
+      <!-- Sized against the crescent, not by eye. The bar is a half-ellipse
+           72x400, so the usable width at row y is
+           72 * sqrt(1 - ((y-200)/200)^2). The item column is right-aligned to
+           the flat edge, so its left edge must stay right of that curve: the
+           content spans dy 68..332, where the curve leaves 54 px, and the
+           column is 44 px. That is the 10 px of headroom that keeps the outer
+           items from being sliced by the bulge. -->
+      <Setter Property="Width" Value="44" />
+      <Setter Property="Height" Value="44" />
+      <Setter Property="Margin" Value="0,2,0,2" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="Glow" Background="{TemplateBinding Background}" CornerRadius="22" />
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3322" />
+          <Setter Property="Foreground" Value="#E8C46A" />
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter Property="Background" Value="#4A3F22" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="MiniButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#8A8A96" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="Glow" Background="{TemplateBinding Background}" CornerRadius="8" />
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3322" />
+          <Setter Property="Foreground" Value="#E8C46A" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <Style x:Key="TabButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="#C8C8D4" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Grid>
+              <Border x:Name="Glow" Background="{TemplateBinding Background}" CornerRadius="22" />
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Background" Value="#3A3322" />
+          <Setter Property="Foreground" Value="#E8C46A" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+  </Window.Resources>
+
+  <Grid>
+    <!-- EXPANDED: the crescent bar, plus the inline panel that opens to its left.
+         No Width here on purpose: this Border wraps BOTH the panel and the bar,
+         so pinning it to 72 would constrain the panel to nothing and centre the
+         whole thing inside the wider panel-open window. The bar's width comes
+         from the last Grid column instead, and the window width comes from
+         Get-HotbarGeometry. -->
+    <Border x:Name="BarBorder"
+            Background="{StaticResource BarFill}"
+            BorderBrush="{StaticResource BarStroke}"
+            BorderThickness="1"
+            CornerRadius="200,0,0,200">
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Opacity="0.65" Color="#FF000000" />
+      </Border.Effect>
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="72" />
+        </Grid.ColumnDefinitions>
+
+        <!-- The bar is the RIGHT column on purpose. The window keeps its right
+             edge pinned to the screen and shifts left by the panel width when the
+             panel opens, so the bar must sit in the last column or the crescent
+             would slide off the screen edge with the panel. -->
+        <StackPanel Grid.Column="1"
+                    VerticalAlignment="Center"
+                    HorizontalAlignment="Right"
+                    Margin="0,0,3,0">
+          <Button x:Name="CollapseHandle"
+                  Style="{StaticResource MiniButton}"
+                  Width="28"
+                  Height="18"
+                  Margin="0,0,0,6"
+                  ToolTip="Collapse the bar">
+            <TextBlock Text="&#x2039;" FontSize="13" FontFamily="Segoe UI, Arial" />
+          </Button>
+          <StackPanel x:Name="ItemsPanel" />
+        </StackPanel>
+
+        <Border x:Name="PanelBorder"
+                Grid.Column="0"
+                Width="320"
+                Visibility="Collapsed"
+                Background="{StaticResource BarFill}"
+                BorderBrush="{StaticResource BarStroke}"
+                BorderThickness="0,1,0,1">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="12,10">
+            <StackPanel x:Name="PanelStack" />
+          </ScrollViewer>
+        </Border>
+      </Grid>
+    </Border>
+
+    <!-- COLLAPSED: a single semicircular tab with a chevron. -->
+    <Border x:Name="TabBorder"
+            Width="46"
+            Height="46"
+            Visibility="Collapsed"
+            Background="{StaticResource BarFill}"
+            BorderBrush="{StaticResource BarStroke}"
+            BorderThickness="1"
+            CornerRadius="23,0,0,23">
+      <Border.Effect>
+        <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Opacity="0.65" Color="#FF000000" />
+      </Border.Effect>
+      <Button x:Name="ExpandButton"
+              Style="{StaticResource TabButton}"
+              ToolTip="Expand the bar">
+        <TextBlock Text="&#x203A;" FontSize="16" FontFamily="Segoe UI, Arial" />
+      </Button>
+    </Border>
+  </Grid>
+</Window>
+'@
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+function Read-HotbarConfig {
+  [CmdletBinding()]
+  param([string]$Path = $script:ConfigPath)
+
+  if (-not [System.IO.File]::Exists($Path)) { throw ("config not found: " + $Path) }
+  $raw = [System.IO.File]::ReadAllText($Path)
+  $config = $raw | ConvertFrom-Json
+  if ($null -eq $config) { throw ("config is not valid JSON: " + $Path) }
+  return $config
+}
+
+# "0x2733" -> the character U+2733. The 0x prefix is optional and a code point
+# above the BMP is rejected rather than silently truncated, because [char] would
+# wrap it into an unrelated glyph and the bar would show nonsense.
+function ConvertFrom-HotbarGlyph {
+  [CmdletBinding()]
+  param([string]$Code)
+
+  $text = ([string]$Code).Trim()
+  if (-not $text) { return "" }
+  if ($text.StartsWith("0x") -or $text.StartsWith("0X")) { $text = $text.Substring(2) }
+  if ($text.StartsWith("#")) { $text = $text.Substring(1) }
+
+  $value = 0
+  if (-not [int]::TryParse($text, [System.Globalization.NumberStyles]::HexNumber, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
+    throw ("glyph is not a hex code point: " + $Code)
+  }
+  if ($value -lt 0 -or $value -gt 0xFFFF) {
+    throw ("glyph outside the BMP (surrogate pairs are not supported): " + $Code)
+  }
+  return [string][char]$value
+}
+
+# The widget starts collapsed when the config says so, so the first frame after a
+# restart is the same every time instead of depending on what was on screen.
+function Initialize-HotbarStateFromConfig {
+  $config = Read-HotbarConfig
+  $script:Config = $config
+
+  $margin = $script:DefaultMargin
+  if ($null -ne $config.margin) {
+    $parsed = 0
+    if ([int]::TryParse(([string]$config.margin), [ref]$parsed) -and $parsed -ge 0) { $margin = $parsed }
+  }
+  $script:Margin = $margin
+
+  $collapsed = $false
+  if ($null -ne $config.collapsed) { $collapsed = [bool]$config.collapsed }
+  $script:Collapsed = $collapsed
+  $script:PanelOpen = $false
+
+  return $config
+}
+
+# ---------------------------------------------------------------------------
+# Geometry
+# ---------------------------------------------------------------------------
+
+# Physical pixels per device-independent unit. WinForms reports Screen geometry in
+# physical pixels; WPF positions and sizes in DIUs. powershell.exe is system-DPI
+# aware, so the process-wide GDI DPI is the scale both views must agree on. The
+# screen DC is read directly with System.Drawing because GetDpiForMonitor would need
+# an Add-Type compile, and this is on the path between the click and the window.
+function Get-HotbarDpiScale {
+  try {
+    $device = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+    $dpiX = $device.DpiX
+    $device.Dispose()
+    if ($dpiX -gt 0) { return [Math]::Round(($dpiX / 96.0), 4) }
+  } catch {
+    # No GDI+ surface: assume 100% and place the bar with raw pixels.
+  }
+  return 1.0
+}
+
+<#
+.SYNOPSIS
+  Where the window goes, in device-independent units.
+
+.DESCRIPTION
+  Expanded: x = wa.Right - 72 - margin, y = wa.Top + (wa.Height - 400) / 2.
+  Collapsed: x = wa.Right - 46 - margin, same vertical centre.
+
+  With the inline panel open the window grows by the panel width and the LEFT edge
+  moves instead, so the bar itself never shifts: the right edge stays pinned to the
+  margin. `monitor` is read from the config but only "primary" is supported in v1;
+  Screen.AllScreens[0] is the primary display on this machine.
+#>
+function Get-HotbarGeometry {
+  [CmdletBinding()]
+  param(
+    [bool]$Collapsed,
+    [bool]$PanelOpen
+  )
+
+  $working = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $scale = Get-HotbarDpiScale
+
+  $right = $working.Right / $scale
+  $top = $working.Top / $scale
+  $height = $working.Height / $scale
+
+  if ($Collapsed) {
+    $width = $script:CollapsedSize
+    $boxHeight = $script:CollapsedSize
+  } else {
+    $width = $script:BarWidth
+    if ($PanelOpen) { $width += $script:PanelWidth }
+    $boxHeight = $script:BarHeight
+  }
+
+  return [pscustomobject]@{
+    X           = [Math]::Round(($right - $width - $script:Margin), 0)
+    Y           = [Math]::Round(($top + (($height - $boxHeight) / 2)), 0)
+    Width       = $width
+    Height      = $boxHeight
+    Scale       = $scale
+    WorkingArea = ("{0}x{1}+{2}+{3}" -f $working.Width, $working.Height, $working.Left, $working.Top)
+  }
+}
+
+function Update-HotbarGeometry {
+  if ($null -eq $script:Window) { return }
+  $geometry = Get-HotbarGeometry -Collapsed $script:Collapsed -PanelOpen $script:PanelOpen
+  $script:Window.Left = $geometry.X
+  $script:Window.Top = $geometry.Y
+  $script:Window.Width = $geometry.Width
+  $script:Window.Height = $geometry.Height
+}
+
+# ---------------------------------------------------------------------------
+# Window construction
+# ---------------------------------------------------------------------------
+function Get-HotbarElement {
+  param($Window, [string]$Name)
+  $element = $Window.FindName($Name)
+  if ($null -eq $element) { throw ("XAML element not found: " + $Name) }
+  return $element
+}
+
+function New-HotbarTextBlock {
+  param(
+    [string]$Text,
+    [string]$Color,
+    [double]$Size = 0,
+    [bool]$Bold = $false,
+    [string]$FontFamily = ""
+  )
+
+  $block = New-Object System.Windows.Controls.TextBlock
+  $block.Text = $Text
+  $block.Foreground = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($Color))
+  $block.FontFamily = New-Object System.Windows.Media.FontFamily ($(if ($FontFamily) { $FontFamily } else { $script:PanelFont }))
+  $block.FontSize = $(if ($Size -gt 0) { $Size } else { $script:PanelFontSize })
+  $block.Margin = New-Object System.Windows.Thickness(0, 1, 0, 1)
+  if ($Bold) { $block.FontWeight = [System.Windows.FontWeights]::Bold }
+  return $block
+}
+
+<#
+.SYNOPSIS
+  Builds one round glyph button and wires its click to the item's action.
+
+.DESCRIPTION
+  The item is attached as Tag rather than captured in the handler's closure. A
+  PowerShell loop variable captured by an event handler is the classic late-binding
+  bug: every button would end up dispatching the last item in the list.
+#>
+function Add-HotbarItemButton {
+  param(
+    $Panel,
+    $Item,
+    [string]$StyleKey
+  )
+
+  $button = New-Object System.Windows.Controls.Button
+  $button.Style = $script:Window.Resources[$StyleKey]
+  $button.ToolTip = ([string]$Item.tooltip)
+  if (-not $button.ToolTip) { $button.ToolTip = [string]$Item.label }
+  $button.Tag = $Item
+
+  $label = New-Object System.Windows.Controls.TextBlock
+  $label.Text = ConvertFrom-HotbarGlyph $Item.glyph
+  $label.FontFamily = New-Object System.Windows.Media.FontFamily($script:GlyphFont)
+  $label.FontSize = 20
+  $label.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+  $label.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+  $button.Content = $label
+
+  $button.Add_Click({
+      param($sender, $eventArgs)
+      if ($null -eq $sender) { return }
+      Invoke-HotbarItemAction -Item $sender.Tag
+    })
+
+  $null = $Panel.Children.Add($button)
+  return $button
+}
+
+function Sync-HotbarItems {
+  $panel = Get-HotbarElement -Window $script:Window -Name "ItemsPanel"
+  $panel.Children.Clear()
+  if ($null -eq $script:Config.items) { return 0 }
+  foreach ($item in $script:Config.items) {
+    $null = Add-HotbarItemButton -Panel $panel -Item $item -StyleKey "ItemButton"
+  }
+  return $panel.Children.Count
+}
+
+<#
+.SYNOPSIS
+  Parses the XAML and returns the wired-up window.
+
+.NOTES
+  [xml] first, so a malformed here-string fails as a structural XML error instead
+  of an opaque XamlReader exception. This is also the SelfTest's XAML check.
+#>
+function New-HotbarWindow {
+  [CmdletBinding()]
+  param()
+
+  $document = [xml]$script:HotbarXaml
+  $window = [System.Windows.Markup.XamlReader]::Parse($document.OuterXml)
+
+  $script:Window = $window
+
+  # Touch every named element once, so a typo in an x:Name is a load-time error and
+  # not a null reference on the first click.
+  foreach ($name in @("BarBorder", "TabBorder", "PanelBorder", "PanelStack", "ItemsPanel", "CollapseHandle", "ExpandButton")) {
+    $null = Get-HotbarElement -Window $window -Name $name
+  }
+
+  $null = Sync-HotbarItems
+
+  $collapse = Get-HotbarElement -Window $window -Name "CollapseHandle"
+  $collapse.Add_Click({ Set-HotbarCollapsed -Collapsed $true })
+
+  $expand = Get-HotbarElement -Window $window -Name "ExpandButton"
+  $expand.Add_Click({ Set-HotbarCollapsed -Collapsed $false })
+
+  # A widget with no way out is a defect, not a design choice. Right-click is the
+  # discoverable path; Escape is the fast one, and it works after the first click
+  # has given the window focus.
+  $window.ContextMenu = New-HotbarContextMenu
+  $window.Add_KeyDown({
+      param($sender, $eventArgs)
+      if ($null -ne $eventArgs -and $eventArgs.Key -eq [System.Windows.Input.Key]::Escape) { $window.Close() }
+    })
+
+  $bar = Get-HotbarElement -Window $window -Name "BarBorder"
+  $tab = Get-HotbarElement -Window $window -Name "TabBorder"
+  if ($script:Collapsed) {
+    $bar.Visibility = [System.Windows.Visibility]::Collapsed
+    $tab.Visibility = [System.Windows.Visibility]::Visible
+  } else {
+    $bar.Visibility = [System.Windows.Visibility]::Visible
+    $tab.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+
+  Update-HotbarGeometry
+  return $window
+}
+
+function New-HotbarContextMenu {
+  $menu = New-Object System.Windows.Controls.ContextMenu
+
+  $edit = New-Object System.Windows.Controls.MenuItem
+  $edit.Header = "Edit config.json"
+  $edit.Add_Click({ Open-HotbarConfig })
+  $null = $menu.Items.Add($edit)
+
+  $reload = New-Object System.Windows.Controls.MenuItem
+  $reload.Header = "Reload config"
+  $reload.Add_Click({
+      try {
+        $null = Initialize-HotbarStateFromConfig
+        $count = Sync-HotbarItems
+        Set-HotbarPanelLines -Open $true -Lines @(
+          (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+          (New-HotbarLine ("  reloaded " + $count + " items") $script:ColorDim 9)
+        )
+      } catch {
+        Set-HotbarPanelLines -Open $true -Lines @(
+          (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+          (New-HotbarErrorLine $_.Exception.Message "  reload failed")
+        )
+      }
+    })
+  $null = $menu.Items.Add($reload)
+
+  $collapse = New-Object System.Windows.Controls.MenuItem
+  $collapse.Header = "Collapse bar"
+  $collapse.Add_Click({ Set-HotbarCollapsed -Collapsed $true })
+  $null = $menu.Items.Add($collapse)
+
+  $quit = New-Object System.Windows.Controls.MenuItem
+  $quit.Header = "Quit hotbar"
+  $quit.Add_Click({ $script:Window.Close() })
+  $null = $menu.Items.Add($quit)
+
+  return $menu
+}
+
+# ---------------------------------------------------------------------------
+# Collapse / expand
+# ---------------------------------------------------------------------------
+function Set-HotbarCollapsed {
+  [CmdletBinding()]
+  param([bool]$Collapsed)
+
+  $script:Collapsed = $Collapsed
+  # The panel is a property of the expanded bar, so collapsing closes it. Session
+  # only: nothing about the collapsed state is written back to config.json.
+  if ($Collapsed) { $script:PanelOpen = $false }
+
+  $bar = Get-HotbarElement -Window $script:Window -Name "BarBorder"
+  $tab = Get-HotbarElement -Window $script:Window -Name "TabBorder"
+  $panel = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
+
+  if ($Collapsed) {
+    $bar.Visibility = [System.Windows.Visibility]::Collapsed
+    $tab.Visibility = [System.Windows.Visibility]::Visible
+    $panel.Visibility = [System.Windows.Visibility]::Collapsed
+  } else {
+    $bar.Visibility = [System.Windows.Visibility]::Visible
+    $tab.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+
+  Update-HotbarGeometry
+}
+
+# ---------------------------------------------------------------------------
+# Inline OmniRoute panel
+# ---------------------------------------------------------------------------
+function New-HotbarLine {
+  param([string]$Text, [string]$Color, [double]$Size = 0, [bool]$Bold = $false)
+  return [pscustomobject]@{ Text = $Text; Color = $Color; Size = $Size; Bold = $Bold }
+}
+
+# One honest line when something could not be read. The reason is kept, because
+# "sin datos" with no cause is the same failure mode as an empty list: the reader
+# cannot tell the user whether the gateway is down or the database is missing.
+function New-HotbarErrorLine {
+  param([string]$Reason, [string]$Prefix = "  sin datos")
+  $reason = ([string]$Reason).Trim()
+  if (-not $reason) { $reason = "no reason reported" }
+  return (New-HotbarLine (Format-HotbarLine ($Prefix + " (" + $reason + ")")) $script:ColorWarn 9)
+}
+
+function Format-HotbarLine {
+  param([string]$Text, [int]$MaxChars = 0)
+  if ($MaxChars -le 0) { $MaxChars = $script:MaxPanelChars }
+  $text = [string]$Text
+  if ($text.Length -le $MaxChars) { return $text }
+  return ($text.Substring(0, $MaxChars - 3) + "...")
+}
+
+function Get-HotbarFirstLine {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  foreach ($line in ($Text -split "`r?`n")) {
+    $trimmed = $line.Trim()
+    if ($trimmed) { return $trimmed }
+  }
+  return ""
+}
+
+<#
+.SYNOPSIS
+  One sample of gateway state: the listening socket and the configured combos.
+
+.DESCRIPTION
+  Both checks are independent, so they are started together and collected after:
+  the panel pays for the slower one instead of their sum. Every read is bounded and
+  windowless (CreateNoWindow), because a console flashing on top of an always-on-top
+  widget is the one bug that would be immediately visible.
+
+  This runs on the UI thread. It is bounded on purpose - roughly 60 ms for the
+  database and 160 ms for the netstat spawn on this machine, both overlapping - so
+  the bar freezes for a fraction of a second instead of gaining a runspace and a
+  Dispatcher hop to avoid it.
+
+  Nothing here can fabricate a value. No gateway API call is made (they all need a
+  key, and this widget never touches one), and a failed read is reported as a
+  failure rather than as an empty configuration.
+#>
+function Get-HotbarOmniRouteSnapshot {
+  [CmdletBinding()]
+  param(
+    [int]$NetstatTimeoutMs = 3000,
+    [int]$BusyTimeoutMs = 1200
+  )
+
+  $portJob = $null
+  try { $portJob = Start-HotbarGatewayProbe } catch { }
+
+  $comboJob = $null
+  try { $comboJob = Start-OmniRouteComboRead -BusyTimeoutMs $BusyTimeoutMs } catch { }
+
+  $gateway = $null
+  if ($null -ne $portJob) {
+    try { $gateway = Complete-HotbarGatewayProbe -Job $portJob -TimeoutMs $NetstatTimeoutMs } catch { }
+  }
+  if ($null -eq $gateway) {
+    $gateway = [pscustomobject]@{ Up = $false; Port = $script:GatewayPort; Detail = "probe failed" }
+  }
+
+  $read = $null
+  if ($null -ne $comboJob) {
+    try { $read = Complete-OmniRouteComboRead -Job $comboJob } catch { }
+  }
+  if ($null -eq $read) {
+    $read = [pscustomobject]@{ Ok = $false; Combos = @(); Provider = ""; Error = "reader unavailable"; ActiveComboName = "" }
+  }
+
+  return [pscustomobject]@{
+    Gateway = $gateway
+    Combos  = $read
+    TakenAt = (Get-Date)
+  }
+}
+
+function Get-HotbarOmniRouteLines {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)]$Snapshot)
+
+  $lines = @()
+  $lines += New-HotbarLine "OmniRoute gateway" $script:ColorGold 11 $true
+
+  if ($Snapshot.Gateway.Up) {
+    $lines += New-HotbarLine ("  UP     localhost:" + $Snapshot.Gateway.Port) $script:ColorUp
+  } else {
+    $lines += New-HotbarLine ("  DOWN   localhost:" + $Snapshot.Gateway.Port) $script:ColorDown
+    $lines += New-HotbarLine (Format-HotbarLine ("  " + $Snapshot.Gateway.Detail)) $script:ColorDim 9
+  }
+  $lines += New-HotbarLine (Format-HotbarLine ("  http://localhost:" + $Snapshot.Gateway.Port + "  -  " + $Snapshot.Combos.Provider)) $script:ColorDim 9
+  $lines += New-HotbarLine "" $script:ColorDim 5
+  $lines += New-HotbarLine "Combos" $script:ColorGold 10 $true
+
+  $read = $Snapshot.Combos
+  if (-not $read.Ok) {
+    $lines += New-HotbarErrorLine (Get-HotbarFirstLine $read.Error) "  combos: sin datos"
+  } elseif (@($read.Combos).Count -eq 0) {
+    $lines += New-HotbarLine "  sin combos" $script:ColorDim 9
+  } else {
+    foreach ($combo in $read.Combos) {
+      $state = if ($combo.Enabled) { "enabled" } else { "disabled" }
+      $text = "  " + ([string]$combo.Name).PadRight(16) + " [" + ([string]$combo.Strategy).PadRight(9) + "] " + $state
+      $color = if ($combo.Enabled) { $script:ColorText } else { $script:ColorDim }
+      $lines += New-HotbarLine (Format-HotbarLine $text) $color
+    }
+  }
+
+  # The active combo is only drawn when the reader actually found the setting. The
+  # gateway keeps it in runtime memory and only exposes it through an authenticated
+  # route, so "sin datos" is the truthful answer and a marker would be a guess.
+  if ($read.ActiveComboName) {
+    $lines += New-HotbarLine (Format-HotbarLine ("  activo: " + $read.ActiveComboName)) $script:ColorGold 9
+  } else {
+    $lines += New-HotbarLine "  combo activo: sin datos" $script:ColorDim 9
+  }
+
+  $lines += New-HotbarLine "" $script:ColorDim 5
+  $lines += New-HotbarLine (Format-HotbarLine ("  sample " + $Snapshot.TakenAt.ToString("HH:mm:ss") + " - click the icon again to close")) $script:ColorDim 9
+  return $lines
+}
+
+function Set-HotbarPanelLines {
+  [CmdletBinding()]
+  param(
+    [object[]]$Lines,
+    [bool]$Open = $true
+  )
+
+  if ($null -eq $script:Window) { return }
+  $stack = Get-HotbarElement -Window $script:Window -Name "PanelStack"
+  $panel = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
+
+  $stack.Children.Clear()
+  foreach ($line in $Lines) {
+    $null = $stack.Children.Add((New-HotbarTextBlock -Text $line.Text -Color $line.Color -Size $line.Size -Bold $line.Bold))
+  }
+
+  $script:PanelOpen = $Open
+  if ($Open) {
+    $panel.Visibility = [System.Windows.Visibility]::Visible
+  } else {
+    $panel.Visibility = [System.Windows.Visibility]::Collapsed
+  }
+  Update-HotbarGeometry
+}
+
+<#
+.SYNOPSIS
+  Toggles the inline panel, re-reading on every open.
+
+.NOTES
+  Snapshot semantics, the same contract as the status popup: the data is sampled
+  when the panel opens and never refreshes on its own, because a repaint loop on top
+  of the desktop is worse than a click.
+#>
+function Toggle-HotbarPanel {
+  if ($script:PanelOpen) {
+    Set-HotbarPanelLines -Lines @() -Open $false
+    return
+  }
+
+  # Show the frame first with a placeholder, so a slow read reads as "busy" instead
+  # of as a button that did nothing.
+  Set-HotbarPanelLines -Open $true -Lines @(
+    (New-HotbarLine "OmniRoute gateway" $script:ColorGold 11 $true),
+    (New-HotbarLine "  reading..." $script:ColorDim 9)
+  )
+
+  $snapshot = Get-HotbarOmniRouteSnapshot
+  Set-HotbarPanelLines -Open $true -Lines (Get-HotbarOmniRouteLines -Snapshot $snapshot)
+}
+
+# ---------------------------------------------------------------------------
+# Item actions
+# ---------------------------------------------------------------------------
+function Invoke-HotbarItemAction {
+  [CmdletBinding()]
+  param($Item)
+
+  if ($null -eq $Item) { return }
+  $action = [string]$Item.action
+  if (-not $action) { $action = "none" }
+
+  try {
+    switch -Regex ($action) {
+      "^none$" { return }
+      "^omniroute-status$" { Toggle-HotbarPanel; return }
+      "^edit-config$" { Open-HotbarConfig; return }
+      "^run:(.+)$" { Start-HotbarCommand -Command $Matches[1] -Item $Item; return }
+      default {
+        # Unknown action: say so in the panel instead of doing nothing silently.
+        # A typo in config.json must be visible, not mysterious.
+        Set-HotbarPanelLines -Open $true -Lines @(
+          (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+          (New-HotbarErrorLine ("unknown action: " + $action))
+        )
+        return
+      }
+    }
+  } catch {
+    Set-HotbarPanelLines -Open $true -Lines @(
+      (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+      (New-HotbarErrorLine $_.Exception.Message "  action failed")
+    )
+  }
+}
+
+function Open-HotbarConfig {
+  [CmdletBinding()]
+  param()
+
+  if (-not [System.IO.File]::Exists($script:ConfigPath)) {
+    Set-HotbarPanelLines -Open $true -Lines @(
+      (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+      (New-HotbarErrorLine ("config not found: " + $script:ConfigPath) "  cannot open")
+    )
+    return
+  }
+  # notepad.exe is a GUI subsystem binary, so Start-Process shows the editor and no
+  # console. Swap this for `code` or another editor by changing this one line.
+  Start-Process -FilePath "notepad.exe" -ArgumentList $script:ConfigPath
+}
+
+function Test-HotbarExecutableOnPath {
+  [CmdletBinding()]
+  param([string]$FileName)
+
+  if (-not $FileName) { return $false }
+  if ([System.IO.Path]::GetExtension($FileName)) { return [System.IO.File]::Exists($FileName) }
+  foreach ($dir in $env:PATH.Split(";")) {
+    if (-not $dir) { continue }
+    try {
+      $candidate = [System.IO.Path]::Combine($dir, $FileName)
+      if ([System.IO.File]::Exists($candidate)) { return $true }
+    } catch {
+      # Unreadable PATH entry: keep scanning, the next one may hold the binary.
+    }
+  }
+  return $false
+}
+
+<#
+.SYNOPSIS
+  Runs an item's `run:<command>` without allocating a console window.
+
+.DESCRIPTION
+  CreateNoWindow = $true and UseShellExecute = $false, the same rule the status
+  popup follows. Output is deliberately NOT redirected: a redirected pipe that
+  nobody drains fills its buffer and deadlocks the child, and inheriting the
+  parent's (hidden) handles keeps a chatty command invisible but alive.
+
+  `cmd.exe /d /c` is used when the target cannot be launched directly. That is the
+  common case on Windows for the tools this bar is meant to launch: npm and
+  friends install claude/codex/opencode as .cmd shims, and a .cmd is not a valid
+  Win32 application, so Process.Start would fail with "not a valid Win32
+  application". /d skips AutoRun commands, which keeps the start fast and free of
+  surprises.
+#>
+function Start-HotbarCommand {
+  [CmdletBinding()]
+  param(
+    [string]$Command,
+    $Item
+  )
+
+  $commandText = ([string]$Command).Trim()
+  if (-not $commandText) { return }
+
+  $workingDirectory = $script:RepoRoot
+  if ($null -ne $Item -and $Item.cwd) {
+    $candidate = [string]$Item.cwd
+    if (-not [System.IO.Path]::IsPathRooted($candidate)) {
+      $candidate = [System.IO.Path]::Combine($script:RepoRoot, $candidate)
+    }
+    if ([System.IO.Directory]::Exists($candidate)) { $workingDirectory = $candidate }
+  }
+
+  $parts = $commandText -split '\s+', 2
+  $executable = $parts[0]
+  $arguments = ""
+  if ($parts.Count -gt 1) { $arguments = $parts[1] }
+
+  $extension = [System.IO.Path]::GetExtension($executable)
+  $useShell = $false
+  if ($extension) {
+    $useShell = ($extension -match '^\.(cmd|bat|ps1|psm1|vbs|js|wsf)$')
+  } else {
+    $useShell = -not (Test-HotbarExecutableOnPath ($executable + ".exe"))
+  }
+
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+  $startInfo.WorkingDirectory = $workingDirectory
+
+  if ($useShell) {
+    $startInfo.FileName = $env:ComSpec
+    if (-not $startInfo.FileName) { $startInfo.FileName = "cmd.exe" }
+    $startInfo.Arguments = "/d /c " + $commandText
+  } else {
+    $startInfo.FileName = $executable
+    $startInfo.Arguments = $arguments
+  }
+
+  $process = [System.Diagnostics.Process]::Start($startInfo)
+  if ($null -eq $process) {
+    Set-HotbarPanelLines -Open $true -Lines @(
+      (New-HotbarLine "hotbar" $script:ColorGold 11 $true),
+      (New-HotbarErrorLine ("could not start: " + $commandText))
+    )
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Self test
+# ---------------------------------------------------------------------------
+<#
+.SYNOPSIS
+  Validates everything that can be validated without a human, and always returns.
+
+.NOTES
+  Closes the window from a DispatcherTimer at SelfTestMs, with a background watchdog
+  at SelfTestMs + 2000 ms behind it. The window cannot outlive the check, so the
+  command can never hang the caller.
+#>
+function Invoke-HotbarSelfTest {
+  [CmdletBinding()]
+  param([int]$DisplayMs = 700)
+
+  $watch = [System.Diagnostics.Stopwatch]::StartNew()
+  $failures = @()
+  $report = @()
+  $window = $null
+
+  try {
+    $config = Initialize-HotbarStateFromConfig
+    $report += ("config=" + [System.IO.Path]::GetFileName($script:ConfigPath))
+
+    $itemCount = 0
+    if ($null -ne $config.items) { $itemCount = @($config.items).Count }
+    $report += ("items=" + $itemCount)
+    if ($itemCount -lt 1) { $failures += "config has no items" }
+
+    foreach ($item in @($config.items)) {
+      $action = [string]$item.action
+      if (-not $action) { $action = "none" }
+      $known = ($script:KnownActions -contains $action) -or $action.StartsWith("run:")
+      if (-not $known) { $failures += ("item " + [string]$item.id + " has an unsupported action: " + $action) }
+      $null = ConvertFrom-HotbarGlyph $item.glyph
+    }
+
+    $window = New-HotbarWindow
+    $report += ("xaml=ok buttons=" + (Get-HotbarElement -Window $window -Name "ItemsPanel").Children.Count)
+
+    $expanded = Get-HotbarGeometry -Collapsed $false -PanelOpen $false
+    $collapsed = Get-HotbarGeometry -Collapsed $true -PanelOpen $false
+    $withPanel = Get-HotbarGeometry -Collapsed $false -PanelOpen $true
+    $working = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $scale = $expanded.Scale
+
+    $expectedX = [Math]::Round((($working.Right / $scale) - $script:BarWidth - $script:Margin), 0)
+    $expectedY = [Math]::Round((($working.Top / $scale) + ((($working.Height / $scale) - $script:BarHeight) / 2)), 0)
+    if ($expanded.X -ne $expectedX -or $expanded.Y -ne $expectedY) {
+      $failures += ("expanded geometry " + $expanded.X + "," + $expanded.Y + " != " + $expectedX + "," + $expectedY)
+    }
+    if ($expanded.Width -ne $script:BarWidth -or $expanded.Height -ne $script:BarHeight) {
+      $failures += ("expanded size " + $expanded.Width + "x" + $expanded.Height + " is not " + $script:BarWidth + "x" + $script:BarHeight)
+    }
+
+    $collapsedX = [Math]::Round((($working.Right / $scale) - $script:CollapsedSize - $script:Margin), 0)
+    $collapsedY = [Math]::Round((($working.Top / $scale) + ((($working.Height / $scale) - $script:CollapsedSize) / 2)), 0)
+    if ($collapsed.X -ne $collapsedX -or $collapsed.Y -ne $collapsedY) {
+      $failures += ("collapsed geometry " + $collapsed.X + "," + $collapsed.Y + " != " + $collapsedX + "," + $collapsedY)
+    }
+    if ($withPanel.X -ne ($expanded.X - $script:PanelWidth)) {
+      $failures += "panel geometry does not keep the right edge pinned"
+    }
+    $report += ("geometry expanded=" + $expanded.X + "," + $expanded.Y + " collapsed=" + $collapsed.X + "," + $collapsed.Y + " panel=" + $withPanel.X + "," + $withPanel.Y)
+    $report += ("screen=" + $expanded.WorkingArea + " dpi_scale=" + $scale)
+
+    $snapshot = Get-HotbarOmniRouteSnapshot -NetstatTimeoutMs 2000 -BusyTimeoutMs 600
+    $lines = Get-HotbarOmniRouteLines -Snapshot $snapshot
+    if ($lines.Count -lt 4) { $failures += "panel produced too few lines" }
+    foreach ($line in $lines) {
+      if ($line.Text.Length -gt $script:MaxPanelChars) {
+        $failures += ("panel line overflows the width: " + $line.Text.Length + " chars")
+      }
+    }
+    $report += ("data gateway=" + $(if ($snapshot.Gateway.Up) { "UP" } else { "DOWN" }) + " combos=" + @($snapshot.Combos.Combos).Count + " provider=" + $snapshot.Combos.Provider)
+
+    Set-HotbarPanelLines -Open $true -Lines $lines
+    $report += ("panel_lines=" + $lines.Count)
+
+    # Show it for real, then close it on a timer.
+    Update-HotbarGeometry
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds($DisplayMs)
+    $timer.Add_Tick({
+        $timer.Stop()
+        $window.Close()
+      })
+    # Explicit (priority, delegate) overloads on both Dispatcher and the timer.
+    # The single-argument BeginInvoke([Action]) form depends on PowerShell
+    # binding a params object[] through a non-UI thread, which is unreliable.
+    $watchdog = New-Object System.Threading.Timer ([System.Threading.TimerCallback] {
+        param($state)
+        $null = $window.Dispatcher.BeginInvoke(
+          [System.Windows.Threading.DispatcherPriority]::Background,
+          [System.Action] { $window.Close() })
+      }, $null, ($DisplayMs + 2000), 0)
+
+    $timer.Start()
+    # ShowDialog returns [bool]; a bare call would leak it into the report stream.
+    $null = $window.ShowDialog()
+    $timer.Stop()
+    $watchdog.Dispose()
+
+    if ($window.IsVisible) { $failures += "window did not close after the self test" }
+    $report += ("shown_ms=" + $DisplayMs)
+  } catch {
+    $failures += $_.Exception.Message
+  } finally {
+    if ($null -ne $window) {
+      try { $window.Close() } catch { }
+    }
+  }
+
+  $watch.Stop()
+  foreach ($line in $report) { Write-Output ("HOTBAR_SELFTEST " + $line) }
+  Write-Output ("HOTBAR_SELFTEST elapsed_ms=" + $watch.ElapsedMilliseconds)
+
+  # The exit code travels in a script variable, never as a return value: the
+  # report above is written to the output stream, and a PowerShell function
+  # returns its whole output stream, so `exit (Invoke-...)` would try to cast
+  # an array of strings to an int.
+  if ($failures.Count -gt 0) {
+    foreach ($line in $failures) { Write-Output ("HOTBAR_SELFTEST check FAIL: " + $line) }
+    Write-Output "HOTBAR_SELFTEST FAIL"
+    $script:SelfTestExitCode = 1
+  } else {
+    Write-Output "HOTBAR_SELFTEST PASS"
+    $script:SelfTestExitCode = 0
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+$application = $null
+if (-not [System.Windows.Application]::Current) {
+  # One Application per AppDomain initialises the dispatcher properly. ShowDialog
+  # is used to run the loop, so the STA thread is never blocked without pumping.
+  $application = New-Object System.Windows.Application
+}
+
+if ($SelfTest) {
+  Invoke-HotbarSelfTest -DisplayMs $SelfTestMs
+  exit $script:SelfTestExitCode
+}
+
+$mutex = New-Object System.Threading.Mutex($false, $script:HotbarMutexName)
+$owned = $false
+try {
+  $owned = $mutex.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+  # A previous bar was killed without releasing: the handle is ours now.
+  $owned = $true
+}
+
+if (-not $owned) {
+  Write-Output "HOTBAR_ALREADY_RUNNING"
+  exit 3
+}
+
+try {
+  $null = Initialize-HotbarStateFromConfig
+  $null = New-HotbarWindow
+  # ShowDialog returns [bool]; keep it off the output stream.
+  $null = $script:Window.ShowDialog()
+  exit 0
+} catch {
+  Write-Output ("HOTBAR_ERROR " + $_.Exception.Message)
+  exit 1
+} finally {
+  try { $mutex.ReleaseMutex() } catch { }
+  $mutex.Dispose()
+}
