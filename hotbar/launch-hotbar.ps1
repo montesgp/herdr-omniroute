@@ -38,7 +38,7 @@
 [CmdletBinding()]
 param(
   [switch]$SelfTest,
-  [int]$SelfTestMs = 700,
+  [int]$SelfTestMs = 400,
   [switch]$Wait
 )
 
