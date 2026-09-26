@@ -8,21 +8,28 @@
       "label": "claude",
       "glyph": "0x2733",
       "action": "none",
-      "tooltip": "Claude - define action en config.json (none | omniroute-status | run:<cmd> | edit-config)"
+      "tooltip": "Claude - define action en config.json (none | omniroute-status | agent-usage | run:\u003ccmd\u003e | edit-config)"
     },
     {
       "id": "codex",
       "label": "codex",
       "glyph": "0x25CE",
       "action": "none",
-      "tooltip": "Codex - define action en config.json (none | omniroute-status | run:<cmd> | edit-config)"
+      "tooltip": "Codex - define action en config.json (none | omniroute-status | agent-usage | run:\u003ccmd\u003e | edit-config)"
     },
     {
       "id": "opencode",
       "label": "opencode",
       "glyph": "0x25C8",
       "action": "none",
-      "tooltip": "Opencode - define action en config.json (none | omniroute-status | run:<cmd> | edit-config)"
+      "tooltip": "Opencode - define action en config.json (none | omniroute-status | agent-usage | run:\u003ccmd\u003e | edit-config)"
+    },
+    {
+      "id": "usage",
+      "label": "uso",
+      "glyph": "0x0024",
+      "action": "agent-usage",
+      "tooltip": "Uso de la sesion en vivo (claude/codex/opencode) - saldo en tiempo real"
     },
     {
       "id": "omniroute",

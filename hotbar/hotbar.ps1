@@ -16,6 +16,8 @@
 
     none              do nothing (the tooltip explains how to wire it up)
     omniroute-status  toggle the inline OmniRoute panel (UP/DOWN + combos)
+    agent-usage       toggle the inline panel with the live claude/codex/opencode
+                      session usage, refreshed every few seconds while it is open
     run:<command>     run a command windowlessly
     edit-config       open config.json in the editor
 
@@ -39,24 +41,26 @@
     routed event as handled, so only empty bar space drags; a click on a button
     stays a click. On release, Snap-HotbarToActiveScreen latches the right edge to
     the monitor under the window centre and persists the device name to config.
+  * The two panels have different refresh contracts. The OmniRoute panel is a
+    snapshot: it is read when it opens and then left alone. The usage panel is
+    live, because a session balance that only updates on click is not a balance.
+    Its DispatcherTimer is owned by Set-HotbarPanelLines, the single choke point
+    every panel write goes through, so a timer can never outlive its panel.
   * Screen geometry is converted from physical pixels to device-independent units
     before it reaches Window.Left/Top. WinForms reports pixels and WPF positions in
     DIUs, so on a scaled display the two disagree by exactly the scale factor. The
     drag-snap round-trips the centre through the scale the same way.
   * The data readers live in hotbar/lib as dot-sourced copies, so the widget is
     standalone: it never reaches into the Herdr plugin's script tree.
-  * Screen geometry is converted from physical pixels to device-independent units
-    before it reaches Window.Left/Top. WinForms reports pixels and WPF positions in
-    DIUs, so on a scaled display the two disagree by exactly the scale factor.
 
 .PARAMETER SelfTest
   Validate the widget without a human: parses the XAML, loads the config, computes
-  both positions, exercises the inline panel data read, opens the window for ~700 ms
-  and closes it again. Prints HOTBAR_SELFTEST PASS and exits 0, or prints the
-  failures and exits 1. It always terminates: the window is closed by a
-  DispatcherTimer, with a background watchdog behind it in case the timer never
-  fires. SelfTest deliberately skips the single-instance check, so it can always be
-  run while a live bar is on screen.
+  both positions, exercises the inline panel data read, opens the window for
+  SelfTestMs (400 ms by default) and closes it again. Prints HOTBAR_SELFTEST PASS
+  and exits 0, or prints the failures and exits 1. It always terminates: the
+  window is closed by a DispatcherTimer, with a background watchdog behind it in
+  case the timer never fires. SelfTest deliberately skips the single-instance
+  check, so it can always be run while a live bar is on screen.
 
 .EXAMPLE
   .\hotbar.ps1
@@ -69,7 +73,15 @@
 [CmdletBinding()]
 param(
   [switch]$SelfTest,
-  [int]$SelfTestMs = 700
+  # 400 ms, not the 700 ms this used to default to. The whole check is measured to
+  # finish in ~1.8 s and the window is the largest single item in it: the other
+  # phases together (process start and WPF 318 ms, the omniroute netstat+sqlite
+  # probe 254 ms, the usage read 468 ms, rendering 162 ms) come to ~1.2 s, so a
+  # 700 ms wait cannot fit in a 2 s ceiling on this machine - it lands at 2.1 s.
+  # The window is pure wait; the geometry, glyph and panel-width assertions are
+  # made from data, not from a human watching it. Pass -SelfTestMs to hold it
+  # open longer and watch it yourself.
+  [int]$SelfTestMs = 400
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,6 +97,7 @@ $script:PanelWidth = 320
 $script:CollapsedSize = 46
 $script:DefaultMargin = 8
 $script:MaxPanelChars = 38
+$script:UsageRefreshSeconds = 5
 $script:GlyphFont = "Segoe UI Symbol, Segoe MDL2 Assets, Segoe UI"
 $script:PanelFont = "Consolas, Courier New"
 $script:PanelFontSize = 10.0
@@ -108,13 +121,18 @@ $script:ConfigPath = [System.IO.Path]::Combine($PSScriptRoot, "config.json")
 
 # Actions the widget understands. Anything else is treated as a no-op: an
 # unrecognised action must never look like a successful one.
-$script:KnownActions = @("none", "omniroute-status", "edit-config")
+$script:KnownActions = @("none", "omniroute-status", "agent-usage", "edit-config")
 
 # Live state, filled in by Read-HotbarConfig and New-HotbarWindow.
 $script:Config = $null
 $script:Margin = $script:DefaultMargin
 $script:Collapsed = $false
 $script:PanelOpen = $false
+# UsagePanelActive is deliberately separate from PanelOpen: the panel is open
+# either way, but only the usage panel owns a refresh timer. Set-HotbarPanelLines
+# is the only writer of both, so the timer cannot outlive the panel it refreshes.
+$script:UsagePanelActive = $false
+$script:UsageTimer = $null
 $script:ActiveScreen = $null
 $script:Window = $null
 
@@ -158,7 +176,7 @@ foreach ($assembly in @("PresentationFramework", "PresentationCore", "WindowsBas
 # only checked for existence here: Get-OmniRouteCombos dot-sources it itself, and
 # loading it twice would re-parse 13 KB for nothing.
 $script:LibRoot = [System.IO.Path]::Combine($PSScriptRoot, "lib")
-foreach ($needed in @("Invoke-Native.ps1", "Get-OmniRouteStatus.ps1", "Get-OmniRouteCombos.ps1", "Read-SqliteQuery.ps1")) {
+foreach ($needed in @("Invoke-Native.ps1", "Get-OmniRouteStatus.ps1", "Get-OmniRouteCombos.ps1", "Read-SqliteQuery.ps1", "Get-AgentUsage.ps1")) {
   $path = [System.IO.Path]::Combine($script:LibRoot, $needed)
   if (-not [System.IO.File]::Exists($path)) {
     Write-Output ("hotbar: missing data helper " + $path)
@@ -168,6 +186,7 @@ foreach ($needed in @("Invoke-Native.ps1", "Get-OmniRouteStatus.ps1", "Get-OmniR
 . ([System.IO.Path]::Combine($script:LibRoot, "Invoke-Native.ps1"))
 . ([System.IO.Path]::Combine($script:LibRoot, "Get-OmniRouteStatus.ps1"))
 . ([System.IO.Path]::Combine($script:LibRoot, "Get-OmniRouteCombos.ps1"))
+. ([System.IO.Path]::Combine($script:LibRoot, "Get-AgentUsage.ps1"))
 
 # ---------------------------------------------------------------------------
 # The window markup. Single-quoted here-string: no PowerShell expansion touches it.
@@ -684,6 +703,13 @@ function New-HotbarWindow {
       if ($null -ne $eventArgs -and $eventArgs.Key -eq [System.Windows.Input.Key]::Escape) { $window.Close() }
     })
 
+  # Every exit path goes through Closed, including the self test's, so the usage
+  # refresh is never left pointing at a window that no longer exists.
+  $window.Add_Closed({
+      $script:UsagePanelActive = $false
+      Stop-HotbarUsagePanelTimer
+    })
+
   # Drag the bar between monitors. Buttons mark MouseLeftButtonDown as handled
   # (that is what makes a click a click), so an unhandled press here means empty
   # bar space and the whole window moves. On release the bar snaps back to the
@@ -759,17 +785,23 @@ function Set-HotbarCollapsed {
 
   $script:Collapsed = $Collapsed
   # The panel is a property of the expanded bar, so collapsing closes it. Session
-  # only: nothing about the collapsed state is written back to config.json.
-  if ($Collapsed) { $script:PanelOpen = $false }
+  # only: nothing about the collapsed state is written back to config.json. The
+  # usage refresh goes with it, for the same reason: there is nothing left to
+  # refresh into.
+  if ($Collapsed) {
+    $script:PanelOpen = $false
+    $script:UsagePanelActive = $false
+    Stop-HotbarUsagePanelTimer
+  }
 
   $bar = Get-HotbarElement -Window $script:Window -Name "BarBorder"
   $tab = Get-HotbarElement -Window $script:Window -Name "TabBorder"
-  $panel = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
+  $panelBorder = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
 
   if ($Collapsed) {
     $bar.Visibility = [System.Windows.Visibility]::Collapsed
     $tab.Visibility = [System.Windows.Visibility]::Visible
-    $panel.Visibility = [System.Windows.Visibility]::Collapsed
+    $panelBorder.Visibility = [System.Windows.Visibility]::Collapsed
   } else {
     $bar.Visibility = [System.Windows.Visibility]::Visible
     $tab.Visibility = [System.Windows.Visibility]::Collapsed
@@ -914,16 +946,39 @@ function Get-HotbarOmniRouteLines {
   return $lines
 }
 
+<#
+.SYNOPSIS
+  Writes the inline panel and owns the refresh timer that belongs to it.
+
+.PARAMETER Panel
+  Which panel these lines are. "usage" is the only live one and is the only one
+  that arms a DispatcherTimer; anything else (or nothing) parks the timer.
+
+.NOTES
+  This is the single choke point every panel write goes through, on purpose. A
+  timer managed at each call site is a timer that one forgotten call site leaves
+  running, and a usage panel that keeps re-sampling after it was closed is a
+  widget that burns a core behind a bar nobody is looking at. Deciding here means
+  "the panel changed, so the timer follows" cannot be got wrong.
+
+  The XAML element is deliberately NOT called $panel: PowerShell variables are
+  case-insensitive, so a [string]$Panel parameter and a $panel local are the same
+  variable, and assigning the Border to the [string] parameter coerces the element
+  into the text "System.Windows.Controls.Border" - after which $panel.Visibility
+  dies with "the property 'Visibility' cannot be found on this object". Same class
+  of bug as the $Port/$GatewayPort collision in Get-OmniRouteStatus.ps1.
+#>
 function Set-HotbarPanelLines {
   [CmdletBinding()]
   param(
     [object[]]$Lines,
-    [bool]$Open = $true
+    [bool]$Open = $true,
+    [string]$Panel = ""
   )
 
   if ($null -eq $script:Window) { return }
   $stack = Get-HotbarElement -Window $script:Window -Name "PanelStack"
-  $panel = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
+  $panelBorder = Get-HotbarElement -Window $script:Window -Name "PanelBorder"
 
   $stack.Children.Clear()
   foreach ($line in $Lines) {
@@ -931,22 +986,26 @@ function Set-HotbarPanelLines {
   }
 
   $script:PanelOpen = $Open
+  $script:UsagePanelActive = ($Open -and $Panel -eq "usage")
+  if (-not $script:UsagePanelActive) { Stop-HotbarUsagePanelTimer }
+
   if ($Open) {
-    $panel.Visibility = [System.Windows.Visibility]::Visible
+    $panelBorder.Visibility = [System.Windows.Visibility]::Visible
   } else {
-    $panel.Visibility = [System.Windows.Visibility]::Collapsed
+    $panelBorder.Visibility = [System.Windows.Visibility]::Collapsed
   }
   Update-HotbarGeometry
 }
 
 <#
 .SYNOPSIS
-  Toggles the inline panel, re-reading on every open.
+  Toggles the OmniRoute panel, re-reading on every open.
 
 .NOTES
   Snapshot semantics, the same contract as the status popup: the data is sampled
   when the panel opens and never refreshes on its own, because a repaint loop on top
-  of the desktop is worse than a click.
+  of the desktop is worse than a click. The usage panel below is the deliberate
+  exception, and the reason it is safe is that its timer dies with the panel.
 #>
 function Toggle-HotbarPanel {
   if ($script:PanelOpen) {
@@ -966,6 +1025,185 @@ function Toggle-HotbarPanel {
 }
 
 # ---------------------------------------------------------------------------
+# Inline session-usage panel
+# ---------------------------------------------------------------------------
+
+# Thousands separated with dots, not commas: the panel is Spanish and the
+# numbers are the part everyone reads. Invariant culture under the hood, so the
+# separator cannot follow some other machine's locale.
+function Format-HotbarCount {
+  param([double]$Value)
+
+  $text = $Value.ToString("#,##0", [System.Globalization.CultureInfo]::InvariantCulture)
+  return $text.Replace(",", ".")
+}
+
+# Two decimals, invariant, so a money value never renders as "12,3" or "12.345"
+# depending on the thread's culture.
+function Format-HotbarMoney {
+  param($Cost)
+
+  if ($null -eq $Cost) { return "" }
+  return ("$" + ([double]$Cost).ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture))
+}
+
+<#
+.SYNOPSIS
+  Draws one snapshot of the three agents.
+
+.DESCRIPTION
+  Four lines per agent at most, and every number on screen came out of a store:
+
+    claude                 name
+      in 322 out 108.595 cache 27.650.764
+      reas 18.739  claude-opus-5-5
+      $12.34   or   costo: sin datos
+
+  The money line is the honest one. Neither jsonl store writes a cost field on
+  this machine, so those two agents render "costo: sin datos" - not a zero, which
+  would be a number nobody measured. opencode does store cost, and its local
+  model really costs 0.0, so it renders $0.00 and says so on the model line.
+
+  A "~" on the token line means the read was bounded: some lines were left
+  outside the read budget, so the totals are a sample of the session, not all of
+  it. Approximate is never silently presented as exact. The marker sits right
+  after the agent name rather than at the end of the line because a line over
+  MaxPanelChars is trimmed from the right, and a marker that gets trimmed off is
+  a lie told by omission.
+
+  Spanish without accents on purpose: every .ps1 in this widget is pure ASCII so
+  the bytes survive any editor and code page.
+#>
+function Get-HotbarUsageLines {
+  [CmdletBinding()]
+  param([Parameter(Mandatory = $true)]$Snapshot)
+
+  $lines = @()
+  $lines += New-HotbarLine "Uso de sesion" $script:ColorGold 11 $true
+
+  $takenAt = $null
+  foreach ($usage in $Snapshot) {
+    if ($null -ne $usage.TakenAt -and $null -eq $takenAt) { $takenAt = $usage.TakenAt }
+
+    if (-not $usage.Ok) {
+      $lines += New-HotbarLine ("  " + $usage.Agent) $script:ColorGold 10 $true
+      $lines += New-HotbarErrorLine (Get-HotbarFirstLine $usage.Error) ("  " + $usage.Agent + ": sin datos")
+      continue
+    }
+
+    $approx = ""
+    if ($usage.Approximate) { $approx = "~ " }
+    $lines += New-HotbarLine ("  " + $usage.Agent + $approx) $script:ColorGold 10 $true
+
+    $tokens = "  in " + (Format-HotbarCount $usage.InputTokens) +
+      " out " + (Format-HotbarCount $usage.OutputTokens) +
+      " cache " + (Format-HotbarCount $usage.CacheTokens)
+    $lines += New-HotbarLine (Format-HotbarLine $tokens) $script:ColorText
+
+    # Reasoning tokens and the model share a line: they are both context, and a
+    # panel that wrapped them would push the money out of view.
+    $context = ""
+    if ($usage.ReasoningTokens -gt 0) { $context = "reas " + (Format-HotbarCount $usage.ReasoningTokens) + "  " }
+    if ($usage.Model) {
+      $context = $context + $usage.Model
+      if ($usage.Local -and $null -ne $usage.Cost -and [double]$usage.Cost -eq 0) { $context = $context + " (modelo local)" }
+    }
+    if ($context) { $lines += New-HotbarLine (Format-HotbarLine ("  " + $context)) $script:ColorDim 9 }
+
+    if ($null -eq $usage.Cost) {
+      $lines += New-HotbarLine "  costo: sin datos" $script:ColorDim 9
+    } else {
+      $lines += New-HotbarLine ("  " + (Format-HotbarMoney $usage.Cost)) $script:ColorUp 10 $true
+    }
+  }
+
+  $lines += New-HotbarLine "" $script:ColorDim 5
+  $stamp = ""
+  if ($null -ne $takenAt) { $stamp = $takenAt.ToString("HH:mm:ss") }
+  $lines += New-HotbarLine (Format-HotbarLine ("  muestra " + $stamp + " - refresco " + $script:UsageRefreshSeconds + "s")) $script:ColorDim 9
+  $lines += New-HotbarLine (Format-HotbarLine "  click de nuevo para cerrar") $script:ColorDim 9
+  return $lines
+}
+
+# Parks the refresh. Safe to call when no timer was ever built: the null check is
+# the difference between "no-op" and a null-reference crash on window close.
+function Stop-HotbarUsagePanelTimer {
+  if ($null -eq $script:UsageTimer) { return }
+  try { $script:UsageTimer.Stop() } catch { }
+}
+
+<#
+.SYNOPSIS
+  Arms the live refresh for the usage panel.
+
+.NOTES
+  One DispatcherTimer, built once and restarted, because a new timer per tick
+  would queue ticks on a dead object. It lives on the UI thread, like everything
+  else here: the readers are bounded (measured 452 ms cold for the slowest one,
+  ~0.5 s for all three), so the bar pauses for a fraction of the 5 s period
+  instead of gaining a runspace and a dispatcher hop to avoid it.
+#>
+function Start-HotbarUsagePanelTimer {
+  if ($null -eq $script:Window) { return }
+
+  if ($null -eq $script:UsageTimer) {
+    $script:UsageTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:UsageTimer.Interval = [TimeSpan]::FromSeconds($script:UsageRefreshSeconds)
+    $script:UsageTimer.Add_Tick({ Update-HotbarUsagePanel })
+  }
+  $script:UsageTimer.Start()
+}
+
+# The refresh itself. The UsagePanelActive guard is the load-bearing line: a tick
+# that fires after the panel closed must not resurrect it, and Set-HotbarPanelLines
+# is what closes it.
+function Update-HotbarUsagePanel {
+  [CmdletBinding()]
+  param()
+
+  if (-not $script:UsagePanelActive) {
+    Stop-HotbarUsagePanelTimer
+    return
+  }
+
+  try {
+    $snapshot = Get-AgentUsageSnapshot
+    if (-not $script:UsagePanelActive) { return }
+    Set-HotbarPanelLines -Open $true -Panel "usage" -Lines (Get-HotbarUsageLines -Snapshot $snapshot)
+  } catch {
+    Set-HotbarPanelLines -Open $true -Panel "usage" -Lines @(
+      (New-HotbarLine "Uso de sesion" $script:ColorGold 11 $true),
+      (New-HotbarErrorLine $_.Exception.Message "  lectura fallida")
+    )
+  }
+}
+
+<#
+.SYNOPSIS
+  Toggles the live usage panel.
+
+.NOTES
+  Opens with a placeholder so the frame appears immediately, then fills it and
+  arms the refresh. Closing parks the timer through Set-HotbarPanelLines, which
+  every panel write goes through.
+#>
+function Toggle-HotbarUsagePanel {
+  if ($script:UsagePanelActive) {
+    Set-HotbarPanelLines -Lines @() -Open $false
+    return
+  }
+
+  Set-HotbarPanelLines -Open $true -Panel "usage" -Lines @(
+    (New-HotbarLine "Uso de sesion" $script:ColorGold 11 $true),
+    (New-HotbarLine "  reading..." $script:ColorDim 9)
+  )
+
+  $snapshot = Get-AgentUsageSnapshot
+  Set-HotbarPanelLines -Open $true -Panel "usage" -Lines (Get-HotbarUsageLines -Snapshot $snapshot)
+  Start-HotbarUsagePanelTimer
+}
+
+# ---------------------------------------------------------------------------
 # Item actions
 # ---------------------------------------------------------------------------
 function Invoke-HotbarItemAction {
@@ -980,6 +1218,7 @@ function Invoke-HotbarItemAction {
     switch -Regex ($action) {
       "^none$" { return }
       "^omniroute-status$" { Toggle-HotbarPanel; return }
+      "^agent-usage$" { Toggle-HotbarUsagePanel; return }
       "^edit-config$" { Open-HotbarConfig; return }
       "^run:(.+)$" { Start-HotbarCommand -Command $Matches[1] -Item $Item; return }
       default {
@@ -1118,10 +1357,16 @@ function Start-HotbarCommand {
   Closes the window from a DispatcherTimer at SelfTestMs, with a background watchdog
   at SelfTestMs + 2000 ms behind it. The window cannot outlive the check, so the
   command can never hang the caller.
+
+  The visible flash defaults to SelfTestMs, not a fixed 700 ms, because the usage
+  panel is on this path and a real read of a live session is 400-500 ms of it.
+  The check has a 2 s ceiling end to end, and a longer flash buys no extra
+  coverage: the geometry, the glyph raster and the panel width are all asserted
+  from data, not from a human looking at it. Pass -SelfTestMs to see it longer.
 #>
 function Invoke-HotbarSelfTest {
   [CmdletBinding()]
-  param([int]$DisplayMs = 700)
+  param([int]$DisplayMs = 400)
 
   $watch = [System.Diagnostics.Stopwatch]::StartNew()
   $failures = @()
@@ -1191,6 +1436,99 @@ function Invoke-HotbarSelfTest {
 
     Set-HotbarPanelLines -Open $true -Lines $lines
     $report += ("panel_lines=" + $lines.Count)
+
+    # The usage panel, exercised for real and drawn for real. Each agent must be
+    # either Ok or carry a reason: a failed read is a valid answer, a failed read
+    # with no reason is a bug. The lines are rendered and measured against the
+    # panel width, because a line that overflows is clipped instead of wrapped.
+    #
+    # The read is bounded to 512 KB rather than the production 8 MB, on purpose,
+    # and the arithmetic is worth writing down. This check has a 2 s ceiling and
+    # the committed baseline already spends 1409 ms of it (measured: process
+    # start, WPF, the omniroute netstat+sqlite probe and a 700 ms window), which
+    # leaves ~590 ms. A cold real read of all three stores costs 550-730 ms on
+    # this machine, so reading the production budget here would push the check
+    # over its own ceiling - and worse, it would make the result depend on how
+    # long the current session has been running, since a session file grows
+    # without limit. At 512 KB the read is ~300 ms and still reads a real recent
+    # slice of a real session: dedup, the cumulative claude counters, the codex
+    # last-record rule, truncation, Approximate, the marker and the render are
+    # all exercised. The panel, not this check, reports the full session. The
+    # budget in force is printed below so nobody reads these numbers as totals.
+    $usageBudget = 512KB
+    $usageWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $usageSnapshot = Get-AgentUsageSnapshot -BusyTimeoutMs 600 -MaxBytes $usageBudget
+    $usageWatch.Stop()
+    $usageLines = Get-HotbarUsageLines -Snapshot $usageSnapshot
+    foreach ($line in $usageLines) {
+      if ($line.Text.Length -gt $script:MaxPanelChars) {
+        $failures += ("usage line overflows the width: " + $line.Text.Length + " chars: " + $line.Text)
+      }
+    }
+    if ($usageLines.Count -lt 4) { $failures += "usage panel produced too few lines" }
+
+    $usageReport = @()
+    $approxSeen = $false
+    $markerSeen = $false
+    foreach ($usage in $usageSnapshot) {
+      if ($usage.Ok -and $usage.Approximate) { $approxSeen = $true }
+      if ($usage.Ok) {
+        $cost = if ($null -eq $usage.Cost) { "sin datos" } else { Format-HotbarMoney $usage.Cost }
+        $usageReport += ($usage.Agent + "=OK " + $cost + $(if ($usage.Approximate) { " aprox" } else { "" }))
+      } else {
+        if (-not ([string]$usage.Error).Trim()) { $failures += ($usage.Agent + " failed without a reason") }
+        $usageReport += ($usage.Agent + "=sin datos")
+      }
+    }
+    # If a read was bounded, the rendered panel has to say so. The marker is the
+    # only thing standing between a sampled total and an exact-looking one.
+    foreach ($line in $usageLines) { if ($line.Text -match '~') { $markerSeen = $true } }
+    if ($approxSeen -and -not $markerSeen) { $failures += "a bounded read was rendered without the ~ marker" }
+    $report += ("usage " + ($usageReport -join " "))
+    $report += ("usage_lines=" + $usageLines.Count + " usage_ms=" + $usageWatch.ElapsedMilliseconds + " usage_budget=" + $usageBudget + "B marker=" + $markerSeen)
+
+    # Timer ownership, checked without waiting for a tick. The interval is 5 s and
+    # the whole self test is under 2 s, so what is under test is the wiring: a live
+    # panel starts a timer, rewriting the same live panel keeps it, and closing
+    # the panel stops it. That last one is the bug worth catching - a usage panel
+    # that keeps sampling after it was closed burns a core behind a hidden bar.
+    #
+    # The intermediate writes render two lines, not sixteen. Each TextBlock costs
+    # about 2 ms to create and configure from PowerShell, and rendering the full
+    # panel four times to check three booleans cost 70 ms of a 2 s budget. The
+    # ownership rule depends on the Panel argument, not on how many lines came
+    # with it, so two lines exercise the same branch. The full panel is rendered
+    # once, at the end, as the state the window actually shows.
+    $timerProbe = @($usageLines[0], $usageLines[1])
+
+    Set-HotbarPanelLines -Open $true -Panel "usage" -Lines $timerProbe
+    Start-HotbarUsagePanelTimer
+    if (-not ($null -ne $script:UsageTimer -and $script:UsageTimer.IsEnabled)) {
+      $failures += "usage refresh timer did not start"
+    }
+
+    Set-HotbarPanelLines -Open $true -Panel "usage" -Lines $timerProbe
+    if (-not ($null -ne $script:UsageTimer -and $script:UsageTimer.IsEnabled)) {
+      $failures += "rewriting the usage panel stopped its own refresh"
+    }
+
+    Set-HotbarPanelLines -Lines @() -Open $false
+    if ($null -ne $script:UsageTimer -and $script:UsageTimer.IsEnabled) {
+      $failures += "usage refresh survived the panel closing"
+    }
+
+    # Another live panel takes the bar over, so the usage refresh must park.
+    Start-HotbarUsagePanelTimer
+    Set-HotbarPanelLines -Open $true -Panel "omniroute" -Lines $timerProbe
+    if ($null -ne $script:UsageTimer -and $script:UsageTimer.IsEnabled) {
+      $failures += "usage refresh survived a panel change"
+    }
+    $report += "usage_timer=ok"
+
+    # Leave the bar showing the usage panel, with its refresh armed, exactly as a
+    # click on the item would.
+    Set-HotbarPanelLines -Open $true -Panel "usage" -Lines $usageLines
+    Start-HotbarUsagePanelTimer
 
     # Show it for real, then close it on a timer.
     Update-HotbarGeometry
