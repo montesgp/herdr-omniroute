@@ -309,13 +309,13 @@ $script:HotbarXaml = @'
                     Margin="0,0,3,0">
           <Button x:Name="CollapseHandle"
                   Style="{StaticResource MiniButton}"
-                  Width="28"
-                  Height="18"
-                  Margin="0,0,0,6"
+                  Width="56"
+                  Height="36"
+                  Margin="0,0,0,8"
                   ToolTip="Collapse the bar">
             <!-- The chevron points where the motion goes: collapsing shrinks the
                  bar toward the screen edge, so the handle points RIGHT. -->
-            <TextBlock Text="&#x203A;" FontSize="13" FontFamily="Segoe UI, Arial" />
+            <TextBlock Text="&#x203A;" FontSize="24" FontFamily="Segoe UI, Arial" />
           </Button>
           <StackPanel x:Name="ItemsPanel" />
         </StackPanel>

@@ -206,5 +206,6 @@ un ítem o cambiar su acción no requiere tocar código.
 - 2026-09-26 (retro del usuario): chevrones de colapso/expansión invertidos y no había drag
   multi-monitor. Fix: chevrones por dirección de movimiento (collapse `›`, expand `‹`), drag
   libre con `DragMove()` en espacio vacío de la barra, snap al borde derecho del monitor bajo
-  el centro al soltar, persistencia de `monitor` en config.json. Verificación pendiente:
-  selftest, E2E visual del usuario (arrastrar al monitor derecho).
+  el centro al soltar, persistencia de `monitor` en config.json. Botón collapse ampliado al
+  doble (56x36, fuente 24). Verificación pendiente: selftest, E2E visual del usuario
+  (arrastrar al monitor derecho).
