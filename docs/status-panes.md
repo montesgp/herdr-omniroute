@@ -4,10 +4,11 @@
 > Este documento es la plantilla de referencia. `herdr-omniroute` es su primer caso real.
 
 > Este documento cubre el patrón **popup** (modal de sesión, una foto, cierre con
-> `q`/Enter). El mismo repo tiene un segundo patrón: el **dock** del
-> [Herdr Hub](hub.md), un split delgado a la derecha que permanece visible, con
-> varios widgets ampliables. Popup para el detalle puntual; dock para lo que se mira
-> mientras se trabaja.
+> `q`/Enter). El mismo repo lo usa dos veces: el status de OmniRoute y el
+> [menú del Herdr Hub](hub.md), que es el mismo popup con teclas en lugar de texto.
+> Un split que permanece visible también es posible (`placement = "split"`), pero
+> cobra ancho de forma permanente para algo que se mira un segundo. Un popup se
+> paga solo mientras está abierto, o no se paga.
 
 ## Qué es un status pane
 
