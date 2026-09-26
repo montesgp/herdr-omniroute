@@ -1,6 +1,6 @@
 # Feature: OmniRoute auto-fallback gateway — Herdr plugin + pi extension
 
-Status: **in progress** — T1–T3 done, T2.1 (status pane) done, T4 needs user.
+Status: **in progress** — T1–T3 done, T2.1 (status pane) done, T2.2 (rediseño a popup modal sin ventanas) done y T2.3 (snapshot al abrir, sin refresco) done, T4b probe ejecutado (2 bloqueos reales detectados).
 
 ## Objective
 Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo el stack de agentes (pi/gentle-shell, codex, claude) con garantía de que siempre corre mientras el usuario trabaja en Herdr, y con visibilidad/control desde Herdr y desde pi (aviso post-call cuando se usa un respaldo).
@@ -19,7 +19,7 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 
 ## Scope
 - Repo nuevo `C:\repositories\personal\herdr-omniroute` (publicable como `montesgp/herdr-omniroute`, topic `herdr-plugin`).
-- Plugin Herdr con manifest `herdr-plugin.toml`: acción `status`, acción `start`, acción `dashboard`, acción `open-status-pane`, pane `status` (tab auto-abierto) y keybind `prefix+o`.
+- Plugin Herdr con manifest `herdr-plugin.toml`: acción `status`, acción `start`, acción `dashboard`, acción `open-status-pane`, pane `status` (popup bajo demanda, sin auto-apertura) y keybind `prefix+o`.
 - Extensión pi en `~/.pi/agent/extensions/omniroute.ts`: slash `/omniroute [status|start|dashboard]` + `setStatus` en footer + aviso `ui.notify` post-call ante respuestas anómalas del gateway.
 - Scheduled task `OmniRouteGateway` + script `%USERPROFILE%\omniroute-start.cmd` (garantía de arranque al logon con restart-on-failure).
 - Configuración de providers/combos en OmniRoute vía dashboard/TUI (T4, requiere al usuario).
@@ -67,19 +67,149 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 
 ### T2.1 — Status pane (sección visible en Herdr para status plugins) — DONE ✅
 - [x] `scripts/status-dashboard.ps1`: dashboard live (UP/DOWN + combos + refresh cada 8s) con switch `-Once` para test sin loop; strip de ANSI del CLI de OmniRoute.
-- [x] `[[panes]]` en manifest: `id = "status"`, `title = "OmniRoute Gateway"`, `placement = "tab"`.
-- [x] `scripts/open-status-pane.ps1` idempotente (si `herdr pane list` ya muestra el pane, no duplica).
-- [x] `[[startup]]` hook → auto-apertura al restaurar sesión de Herdr (aplica en próximos arranques).
+- [x] `[[panes]]` en manifest: `id = "status"`, `title = "OmniRoute Gateway"`, `placement = "tab"`. — **SUPERADO por T2.2** (ahora `placement = "popup"`).
+- [x] `scripts/open-status-pane.ps1` idempotente (si `herdr pane list` ya muestra el pane, no duplica). — **SUPERADO por T2.2** (el popup no tiene pane id; el opener es una sola llamada).
+- [x] `[[startup]]` hook → auto-apertura al restaurar sesión de Herdr (aplica en próximos arranques). — **SUPERADO por T2.2** (bloque `[[startup]]` eliminado a propósito).
 - [x] Acción `herdr.omniroute.open-status-pane`; manifest v0.2.0.
 - [x] `docs/status-panes.md`: patrón reutilizable de status plugins (roadmap: output total entre proyectos; plugins por proyecto irán a pi).
 - [x] Test `-Once` OK: UP + combos `Kimi Coding`/`static-best-coding`. Pane abierto manualmente en la sesión activa.
 - [x] Feedback usuario (15:44): quería el panel en TODOS los workspaces y refresco no brusco. Ajustado: opener itera `herdr workspace list` y abre con `--workspace <id>` `--no-focus` (idempotente por workspace); dashboard pasa de `Clear-Host` a render in-place (`Home` con `[Console]::SetCursorPosition`/fallback ANSI `ESC[H` + `ESC[K` por línea + línea reservada anti-restos + `-RefreshSec` configurable). Verificado: 3 pestañas (w19:t2, w1F:t3, w1G:t2) y segunda pasada → "0 opened, 3 already open".
 - Evidencia: manifest v0.2.0 con panes/startup; test dashboard; pane abierto (pestaña visible en los 3 workspaces).
 
+### T2.2 — Rediseño a popup modal sin ventanas — DONE ✅
+Causa raíz del defecto: el loop `while ($true)` + `Start-Sleep 8` de `status-dashboard.ps1` lanzaba
+`node ... combo list` con el call operator `&` en cada vuelta. Cada hijo de consola así lanzado
+puede abrir su propio `conhost.exe`, y dentro de un pane/popup eso se ve como una ventana de
+terminal parpadeando. El loop antiguo se detuvo; no queda ningún proceso así corriendo.
+
+Cambios:
+- [x] `[[panes]] status` → `placement = "popup"`, `width = "60%"`, `height = 14`. Un popup es
+      modal de sesión: sin pane id, recibe todo el input y **se cierra solo al salir su comando**.
+- [x] Bloque `[[startup]]` **eliminado**: nada se auto-abre al restaurar sesión. Manifest 0.3.0.
+- [x] `scripts/lib/Invoke-Native.ps1` (nuevo, compartido): `System.Diagnostics.Process` con
+      `UseShellExecute = $false` + `CreateNoWindow = $true`; en PS 5.1 `ArgumentList` no existe,
+      así que `$psi.Arguments` se construye a mano con el escapado de comillas de
+      `CommandLineToArgvW`; `ReadToEnd` de stdout/stderr + `WaitForExit(timeout)` y kill al
+      vencer el plazo. Devuelve stdout, o stderr si el exit code != 0.
+- [x] `status-dashboard.ps1`: toda llamada externa pasa por el helper (netstat, node, herdr);
+      ya no queda ningún `& node` / `& herdr`. Loop acotado con `-Once`, `-RefreshSec 2`,
+      `-MaxSeconds 300` (tope duro), `-NoKeyWatch`; cualquier tecla (Escape incluida) sale con
+      código 0; si `[Console]::KeyAvailable` no es soportado, degrada a espera acotada y el tope
+      sigue garantizando la salida. Render in-place (`Home` + `ESC[K` por línea + `ESC[J` de
+      cierre). Si falta node o la entry, dibuja frame de error y sale con código != 0. Nunca lanza.
+- [x] `open-status-pane.ps1`: una sola llamada `herdr plugin pane open --plugin herdr.omniroute
+      --entrypoint status`, sin enumerar workspaces ni sondear panes; `ui_busy` → mensaje corto y
+      exit 0. Por el helper sin ventana.
+- [x] Docs actualizadas al modelo popup: `README.md`, `docs/architecture.md`,
+      `docs/status-panes.md` (el patrón deja de enseñar `while ($true)` sin cota).
+
+Evidencia ejecutada (2026-09-25, noche):
+- [x] `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\status-dashboard.ps1 -Once`
+      → exit 0, un frame: `Estado: UP (localhost:20128)`, URL, combos `Kimi Coding [priority]`
+      y `static-best-coding [weighted]`, pie de cierre. ~5,3 s.
+- [x] `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\open-status-pane.ps1`
+      → "OmniRoute: status popup opened (any key or Escape closes it).", exit 0.
+- [x] `herdr pane list` antes y después: los mismos 2 panes (w1G:p1, w1H:p1). El popup **no**
+      crea pane.
+- [x] Proceso del popup visible como `powershell.exe -File scripts/status-dashboard.ps1` hijo de
+      `herdr.exe`, filtrando por `$PID` propio (el auto-match es un falso positivo conocido).
+- [x] Cero ventanas: hook de eventos Win32 (`EVENT_OBJECT_CREATE`/`SHOW`) durante 70 s con el
+      popup abierto, 745 eventos capturados y **0 eventos propiedad del pid del popup**. Las
+      únicas ventanas de consola del sistema pertenecen a Windows Terminal (pid 2268), no al
+      plugin. Los conteos brutos de `conhost.exe` en la máquina son ruido de fondo (31 en 20 s
+      sin popup), por eso la atribución es por ascendencia, no por conteo.
+- [x] Cierre por tecla: hijo lanzado con consola real + inyección de `KEY_EVENT` en su `CONIN$`.
+      Tecla `q` → exit 0 a los 4,9 s (con tope de 120 s). Escape → exit 0 inmediato.
+- [x] Topes: `-MaxSeconds 6` → exit 0 en 9,4 s; `-MaxSeconds 5` con stdin en `NUL` (ruta de
+      fallback, `[Console]::KeyAvailable` lanza `InvalidOperationException`) → exit 0 en 5,5 s;
+      `-MaxSeconds 4` → exit 0 en 6,0 s.
+
+No verificado (no se afirma como comprobado):
+- El cierre por tecla **dentro del popup de Herdr** no se pudo ejecutar: el popup corre sobre una
+  pseudoconsola ConPTY y no se puede inyectar una tecla en su buffer desde otro proceso. Se
+  verificó el camino de código con una consola real, que es idéntico.
+- El tope de 300 s se verificó con corridas directas de `-MaxSeconds 4/5/6`, no esperando 5 min
+  con el popup abierto.
+- `conhost.exe` sigue apareciendo como hijo *headless* del `node.exe` que lanza el popup
+  (`CreateNoWindow` suprime la ventana, no el proceso host). No se ha observado ninguna ventana.
+
+### T2.3 — Snapshot al abrir, sin refresco periódico — DONE ✅
+Decisión del usuario: **el popup muestra una única foto tomada al abrir**. Refrescar cada dos
+segundos retrasaba la pantalla sin aportar nada; la forma de tener datos frescos es reabrir el
+popup.
+
+Cambios:
+- [x] `status-dashboard.ps1`: fuera el loop de render, fuera el `Start-Sleep` entre renders, fuera
+      el repintado in-place. Se queda **un solo `Render`**.
+- [x] Parámetro `-RefreshSec` **eliminado** (ya no significa nada). Se conservan `-Once` (una foto y
+      `exit 0` inmediato, para checks no interactivos), `-MaxSeconds` (300, tope duro) y
+      `-NoKeyWatch`.
+- [x] Ruta por defecto: una foto, y después `Wait-ForKey` **sin dibujar nada**, con el tope de
+      `-MaxSeconds` como plazo. Ambas ramas (tecla y tope) salen con código 0, que es lo que cierra
+      el popup. No se puede salir tras pintar: el popup es modal de sesión y se cerraría antes de
+      poder leerlo.
+- [x] Texto del frame sin intervalo de refresco: `Instantanea: HH:mm:ss  (una sola muestra; no se
+      refresca)` + pie `Cerrar: cualquier tecla (Esc incluida) cierra este popup. Tope 300s.`. El
+      resto de la información (UP/DOWN, URL/puerto, combos) queda igual.
+- [x] Intactos: helper sin ventana `lib\Invoke-Native.ps1`, todas las llamadas externas por él,
+      preflight de `node` y de la entry con frame de error y exit != 0, y la regla de que un exit
+      code != 0 gana sobre stdout no vacío.
+- [x] Manifest: `open-status-pane` `title` = "OmniRoute: open status popup" (lee como popup, no
+      como pane). Nada más del manifest; sigue **sin `[[startup]]`**.
+- [x] Docs: `README.md`, `docs/architecture.md`, `docs/status-panes.md` pasan a foto-al-abrir; el
+      keybind `prefix+o` documentado como el que abre el popup.
+
+Evidencia ejecutada (2026-09-25):
+- [x] **Conteo de hijos, ANTES** (script con refresco): sondeo 12 s @250 ms, 35 muestras, dashboard
+      vivo todo el tiempo → **3 hijos distintos**: 2× `node.exe` (`omniroute.mjs combo list
+      --no-color`) + 1× `conhost.exe`. Timestamps de frame 18:54:23 / 18:54:31 / 18:54:38, o sea
+      un render cada ~7-8 s.
+- [x] **Conteo de hijos, DESPUÉS** (build limpio, popup real): sondeo 12 s @500 ms, 21 muestras,
+      dashboard vivo todo el tiempo → **0 hijos distintos**. `node.exe`=0, `herdr.exe`=0,
+      `netstat.exe`=0, `conhost.exe`=0. Repetido sobre el build instrumentado: 12 s, 21 muestras,
+      0 hijos.
+- [x] Cero repintados: en una corrida instrumentada de 82 s hay **una sola** línea de render en el
+      trace, seguida de 1314 sondeos de `KeyAvailable` sin dibujar.
+- [x] Cierre por tecla **verificado dentro del popup real**: `[Console]::KeyAvailable`=False durante
+      82.3 s (1314 polls) y luego `char=27 key=Escape` → `wait returned` → `exit 0`.
+- [x] Tope: `-MaxSeconds 5 -NoKeyWatch` → `exit 0` a los 11,0 s (5,5 s de render + 5 s de espera),
+      1 sola cabecera de frame y 1 solo timestamp. Cero frames repetidos.
+- [x] `-Once` × 8 corridas: siempre `exit 0`, 1 cabecera, 1 timestamp, **0** apariciones de
+      "refresh cada", y **0** `(sin combos)` falsos.
+- [x] Popup real: exactamente 1 proceso dashboard, hijo de `herdr.exe` (ppid = server). `herdr pane
+      list` sigue con **2 panes** (w1G:p1, w1H:p1) antes y después → el popup no crea pane. Confirmado
+      además que `herdr pane read <id-interno>` responde `pane_not_found`.
+- [x] Parada del popup: `Stop-Process` sobre el pid del dashboard → **0** procesos dashboard
+      restantes (filtrando por `CommandLine -like '*status-dashboard*'` y excluyendo el `$PID` propio).
+- [x] `herdr plugin log list`: 12/12 `succeeded`, 0 fallidas. `git diff --check` limpio. Parse OK en
+      los tres scripts. Parámetros finales: `Once, MaxSeconds, NoKeyWatch` (sin `RefreshSec`).
+
+No verificado (no se afirma como comprobado):
+- El **tope de 300 s dentro del popup real** no se esperó entero; el tope se verificó con
+  `-MaxSeconds 5` fuera del popup (mismo código de espera).
+- El cierre por tecla se observó con **Escape**. No se verificó otra tecla dentro del popup.
+- El objetivo de `-Once` "muy por debajo de 5 s" **no se cumple de forma estable**: el frame tarda
+  3,85–3,92 s cuando los combos salen, pero 6,3–9,5 s cuando la CLI de OmniRoute aborta. El coste
+  es externo: `netstat` 150 ms vs `node ... combo list` 5 515 ms. No es un efecto de este cambio
+  (cambiar qué campos se muestran está fuera de scope).
+
+Hallazgos que quedan registrados:
+- La CLI `omniroute combo list` **aborta de forma intermitente** con `Error: This operation was
+  aborted` y exit 1 (5/5, luego 0/3, luego 2/5 en corridas seguidas). Cuando aborta, el script
+  muestra el diagnóstico honesto `(CLI de OmniRoute no disponible: ...)` y **nunca** un
+  `(sin combos)` falso: la regla de "exit != 0 gana sobre stdout" ya lo cubría y queda verificada
+  con 8 corridas. Es un defecto externo, previo a este cambio, y la doc de combos se mantiene.
+- El popup es **modal de sesión y toma todo el input del terminal**, así que cualquier Escape que
+  llegue por el flujo de entrada lo cierra. Eso explica corridas cortas de 6–13 s: eran Escape
+  reales, no un fallo. No es evitable sin dejar de ser modal.
+
 ### T4 — Configuración de providers/combos en OmniRoute — REQUIERE USUARIO
 - [x] Usuario: abrió dashboard y creó dos combos habilitados — `Kimi Coding` [priority] y `static-best-coding` [weighted] — con providers conectados (gemini/g4f-gemini/uncloseai activos; opencode/OpenCode Free, chipotle, cloudflare-playground, duckduckgo-web, felo-web, aihorde, theoldllm).
-- [ ] Probe: llamada con modelo auto vía endpoint /v1 (curl) → confirmar corte automático y headers de respuesta.
-- [ ] Registrar en pi un custom provider `omniroute` (models.json o registerProvider) apuntando a http://localhost:20128 (validar formato antes de tocar config real).
+- [x] Probe routing (2026-09-25 21:0x): `simulate --explain` → árbol primary `moonshot/kimi-k3` (85%) → fallbacks `kimi-coding/k3` → `kimi-web/k3`, breakers CLOSED, quota 100%. Llamadas reales OK: `chat` default → `gemini-2.5-flash` (200, 19 tok); `chat --combo "Kimi Coding"` → `gemini-3.1-flash-lite-preview` (200, 131 tok, **70.8 s**).
+- [x] **BLOQUEO 1 (combo muerto)**: `providers list` no muestra conexiones `moonshot`, `kimi-coding` ni `kimi-web` — solo 10 conexiones, 3 `active` (g4f-gemini, gemini, uncloseai). Los 3 miembros del combo `Kimi Coding` apuntan a providers inexistentes → el router abandona el combo y resuelve `auto` escaneando el pool global (logs: ráfaga de 400/429 en g4f-gemini y felo-web, `auto/auto 499`, luego 503→200 en gemini). Acción: reconfigurar el combo con providers reales o borrarlo.
+- [x] **BLOQUEO 2 (sin API key de gateway)**: `GET/POST http://localhost:20128/api/v1/*` → `401 invalid_api_key` ("Authentication required"). `keys list` solo devuelve 2 keys de *provider* (g4f-gemini, gemini, masked `enc:v1***`). `openapi try` también 401; no hay flag `--no-auth` en `serve`. Headers CORS admiten `x-omniroute-connection`, `X-OmniRoute-Lease-Owner`, `X-OmniRoute-Lease-Generation` → sí hay señal de routing/fallback, pero requiere cliente autenticado. Vía soportada para crear la key: `omniroute config set <tool>` (escribe config del cliente: Claude Code, Codex CLI, OpenCode, …).
+- [ ] Registrar en pi un custom provider `omniroute` apuntando a http://localhost:20128 (bloqueado por BLOQUEO 2: hace falta key de gateway; la vía soportada es `omniroute config set`, no editar models.json a mano).
+- [ ] Verificar si OmniRoute añade headers `x-omniroute-*` de fallback en respuestas OK (no solo ≥400) — pendiente de cliente autenticado.
 - [ ] Ajustar perfil/agente en gentle-pi si se decide fijar modelo crítico sin fallback (decisión pendiente del usuario).
 
 ## Authorized scope (confirmado)
@@ -107,6 +237,68 @@ Hacer que OmniRoute sea el gateway de fallback automático de tokens para todo e
 - 2026-09-25 (15:18): T2 y T3 COMPLETADAS por writer delegado y verificadas por el orquestador (gatekeeper: archivos presentes, link enabled, action status UP, hash repo↔deploy idéntico, keybind añadido). Commits: 804c336 (plugin), 96aad49 (extensión). Riesgos anotados: pi instalado es 0.87.1 (API equivalente); campo `author` no documentado en manifest (Herdr lo ignora); `setStatus/notify` devuelven void (await inofensivo bajo jiti); `herdr plugin action invoke` devuelve `running` (stdout vía `herdr plugin log list`); carga real en sesión pi TTY + tecla `prefix+o` + dashboard end-to-end no verificables aquí.
 - 2026-09-25 (15:38): T2.1 completada (ruta inline: piezas mecánicas derivadas de la doc oficial de panes, sin investigación nueva; verificación local `-Once` imprime UP + combos). Pane `status` (tab) declarado + startup idempotente + acción `open-status-pane`; manifest 0.2.0; `docs/status-panes.md` documenta el patrón reutilizable y la hoja de ruta (output total entre proyectos; plugins por proyecto → pi).
 - 2026-09-25 (15:47): feedback T2.1b — panes por-workspace (plugin v1 no tiene pane global de sesión) → opener multi-workspace (workspace list + pane open --workspace --no-focus, idempotente por workspace) y refresh in-place sin Clear-Host (set cursor position + ESC[K por línea + línea reservada + -RefreshSec). Verificado: 3 pestañas (w19/w1F/w1G), 0 duplicados al repetir. Limitación documentada: workspaces nuevos en sesión activa no reciben el pane hasta reiniciar/acción manual.
+- 2026-09-25 (21:05): "no veo nada en ningún lado" → causa raíz: el hook `[[startup]]` corre **una vez por plugin al restaurar sesión**; los workspaces actuales (w1G incoders-commerce, w1H herdr-omniroute) se crearon después, y Herdr v1 no expone hook de "workspace created". El pane además abre con `--no-focus`, así que nunca roba el foco. Resuelto invocando la acción a mano: `herdr plugin action invoke herdr.omniroute.open-status-pane` → "2 opened, 0 already open" (w1G:p3 tab t3, w1H:p8 tab t2). Contenido confirmado con `herdr pane read w1H:p8` → "Estado: UP (localhost:20128)" + ambos combos + "Actualizado 18:07:45 (refresh cada 8s)". Mejora pendiente: o hook de sesión nueva más frecuente, o instruir al usuario con la acción en el README.
+- 2026-09-25 (21:00–21:10): T4b probe. Base URL OpenAI-compatible = **`/api/v1/*`** (no `/v1/*`). `simulate --explain` da el árbol de fallback; `usage logs` da la traza real por llamada. Hallazgo clave: el árbol por defecto (moonshot/kimi) y el combo `Kimi Coding` apuntan a providers sin conexión creada → el fallback "funciona" pero cayendo al pool global con ~70 s de discovery. Solo 3 conexiones `active` (g4f-gemini, gemini, uncloseai). `providers status` devuelve "No provider connection data available" (bug/feature de la CLI 3.8.50, no bloqueante). La integración de clientes pasa por `omniroute config set <tool>` (Claude Code, Codex CLI, OpenCode detectados, ninguno configurado) — escribir en esas configs requiere autorización del usuario.
+- 2026-09-25 (noche) — T2.2: el usuario reportó **ventanas de terminal parpadeando**. Causa raíz: el
+  `while ($true)` del dashboard lanzaba `node ... combo list` con `&` cada 8 s; cada hijo de consola
+  podía abrir su propio `conhost.exe` y, dentro de un pane, eso se ve parpadear. Loop antiguo parado.
+  Rediseño: `placement = "popup"` (modal de sesión, se cierra al salir su comando), `[[startup]]`
+  eliminado (nada se auto-abre al restaurar sesión), y **todas** las llamadas externas pasan por
+  `scripts/lib/Invoke-Native.ps1` (`CreateNoWindow = $true`, sin `ArgumentList` porque PS 5.1).
+  Además el loop pasó a estar acotado (`-MaxSeconds 300`) y a cerrarse con cualquier tecla.
+  Verificado: `-Once` exit 0; opener exit 0 y `herdr pane list` sin panes nuevos; 70 s de hook de
+  eventos Win32 con el popup abierto → **0 ventanas** creadas por el popup; tecla y Escape cierran con
+  exit 0; topes de 4/5/6 s respetados. Detalle y límites en la sección T2.2.
+
+- 2026-09-25 (T2.3): decisión del usuario — **fuera el refresco periódico**. El popup ahora pinta
+  **una foto al abrir** y se queda vivo esperando una tecla sin repintar, porque un popup es modal
+  de sesión y se cerraría al salir su comando. `-RefreshSec` eliminado; quedan `-Once`,
+  `-MaxSeconds` (300) y `-NoKeyWatch`. Prueba clave: el conteo de hijos del dashboard pasó de
+  **3 en 12 s** (2× `node.exe combo list` + 1× `conhost.exe`, con renders cada ~7-8 s) a
+  **0 en 12 s** con el popup abierto. Verificado además el cierre por Escape **dentro del popup
+  real** (82,3 s de espera, `char=27`) y que el tope acota la salida. Se actualizaron README,
+  `docs/architecture.md`, `docs/status-panes.md` y el `title` de la acción. Pendiente conocido: la
+  CLI de OmniRoute aborta intermitente, así que `-Once` puede tardar 6–9 s; el frame nunca miente
+  con un `(sin combos)` falso.
+
+- 2026-09-25 (T2.4) — **datos directos + tecla concreta**. Dos cambios independientes:
+
+  **(a) Se acabó la CLI de OmniRoute en el popup.** El frame ya no llama a
+  `node ... combo list`: lee `storage.sqlite` en solo lectura. Proveedor preferido
+  `sqlite3.exe -readonly` a través de `scripts/lib/Invoke-Native.ps1`; respaldo
+  P/Invoke contra `C:\Windows\System32\winsqlite3.dll`. La consulta trae `strategy` y
+  `enabled` con `json_extract`, y el combo activo se intenta leer de
+  `key_value(namespace='settings', key='activeCombo')` (quitando las comillas del JSON).
+  **Dato duro verificado (2026-09-25): en esta instalación esa clave NO existe.** El
+  gateway guarda el combo activo solo en memoria y lo expone por `GET /api/settings`,
+  que exige login — medido: 401 sin key a los 2.1 s. Por eso el popup ya NO pinta
+  `●`/`○` a ciegas: solo los muestra cuando el reader encuentra la clave; si no, una
+  línea honesta lo dice y no inventa un estado. Encender el marcador real exige una
+  gateway API key (workstream T4b/key, pendiente). Ventaja de fondo que sí se mantiene:
+  0 hijos `node.exe`.
+  Latencia de `-Once`: **6059 ms → 610–728 ms (media ~647 ms)**, medido en 3 corridas.
+
+  **Objetivo de 300 ms NO alcanzado, y se dice con números.** Arranque en frío de
+  `powershell.exe` vacío ya consume 223–299 ms; la primera operación real añade ~53 ms y la
+  lectura directa 33–57 ms. El shim de scoop solo añade ~15 ms en caliente, así que no es el
+  cuello. `pwsh` es más lento (325–367 ms). Reacharlo exigiría otro host o un worker
+  residente: fuera del alcance de este cambio. Queda documentado como límite conocido en
+  README, `docs/architecture.md` y `docs/status-panes.md`.
+
+  **(b) Solo `q` y Enter cierran.** Un popup es modal de sesión y se traga todo el flujo de
+  entrada, así que "cualquier tecla" se cerraba solo con bytes ambiente. El predicado vive
+  ahora en `scripts/lib/Wait-PopupDismiss.ps1` (dot-sourceado) y no dentro del dashboard, para
+  poder ejercitar el contrato real sin un popup: 8 casos sintéticos de `ConsoleKeyInfo`
+  (`q`,`Q`,`Enter` aceptan; `Escape`,`spacebar`,`x`,`UpArrow`,`null` rechazan) más el tope
+  acotado (400 ms → 476 ms) y el tope cero (0 ms, no cuelga). Todo en verde.
+
+  Sin cambios de formato cuando el estado activo es conocido: las líneas de combo
+  salen byte a byte iguales a las de la CLI (`●`/`○`, nombre a 25, estrategia a 12,
+  `enabled|disabled`). Cuando no hay `activeCombo` en la DB, no se pinta ni `●` ni `○`
+  y se añade una línea explicativa, para no dar una respuesta que no tenemos.
 
 ## Next step
-T4b (probe /v1 con combo + provider custom en pi hacia localhost:20128) y pruebas del usuario (ver la pestaña "OmniRoute Gateway", `prefix+o`, `/omniroute`, scheduler al reiniciar). Futuro: plugin general de output total entre proyectos siguiendo `docs/status-panes.md`.
+1. Usuario: abrir el popup con `prefix+o` / la acción `open-status-pane`. Solo `q` o Enter lo cierran; Escape y el resto de teclas ya no lo cierran (a propósito, es modal de sesión). No hay pestaña que revisar: el status es un popup bajo demanda.
+2. Decidir T4b: (a) `omniroute config set opencode|claude|codex` para crear la key de gateway y apuntar los clientes al gateway (escribe configs existentes del usuario), o (b) arreglar primero el combo `Kimi Coding` con providers reales.
+3. Futuro: plugin general de output total entre proyectos siguiendo `docs/status-panes.md`, ya sobre el patrón de popup acotado.
+4. Si el objetivo de 300 ms importa de verdad, la decisión no es "optimizar el script": es cambiar de host (binario nativo o worker residente) y eso se decide aparte.

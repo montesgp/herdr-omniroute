@@ -1,37 +1,52 @@
+<#
+.SYNOPSIS
+  Opens the OmniRoute gateway status popup, once, in the current context.
+
+.DESCRIPTION
+  The status pane is declared with placement = "popup", which is a session-modal
+  terminal: it takes all terminal input and closes on its own when the command
+  exits. The running command is therefore the state, so there is nothing to probe
+  and no existing-pane detection to keep in sync. The dashboard closes itself on
+  `q`, on Enter, or on the -MaxSeconds cap; every other key, Escape included, is
+  ignored, because a session modal swallows the whole byte stream and an any-key
+  rule lets ambient input dismiss the popup.
+
+  The Herdr call goes through the windowless helper in lib\Invoke-Native.ps1, so
+  opening the popup never flashes a console window.
+#>
 $ErrorActionPreference = "SilentlyContinue"
+
 $herdr = if ($env:HERDR_BIN_PATH) { $env:HERDR_BIN_PATH } else { "herdr" }
-$label = "OmniRoute Gateway"
 
-# Enumerar workspaces y panes de la sesión (JSON). Si algo falla, se abre sin target (workspace activo).
-$ws = $null
-$panes = $null
+$lib = Join-Path $PSScriptRoot "lib\Invoke-Native.ps1"
+if (-not (Test-Path -LiteralPath $lib)) {
+  Write-Output "OmniRoute: missing helper $lib"
+  exit 1
+}
+. $lib
+
 try {
-  $ws = (& $herdr workspace list 2>$null | Out-String | ConvertFrom-Json)
-  $panes = (& $herdr pane list 2>$null | Out-String | ConvertFrom-Json)
-} catch { }
+  $r = Invoke-NativeText -FilePath $herdr -Arguments @(
+    "plugin", "pane", "open",
+    "--plugin", "herdr.omniroute",
+    "--entrypoint", "status"
+  ) -TimeoutMs 20000
 
-$workspaces = @()
-if ($ws -and $ws.result.workspaces) { $workspaces = @($ws.result.workspaces) }
+  $text = ""
+  if ($r.Text) { $text = ($r.Text -replace "\s+", " ").Trim() }
 
-if ($workspaces.Count -eq 0) {
-  # Fallback: abrir en el workspace activo como antes
-  & $herdr plugin pane open --plugin herdr.omniroute --entrypoint status 2>&1 | Out-String | Write-Output
-  exit $LASTEXITCODE
-}
-
-$knownPanes = @()
-if ($panes -and $panes.result.panes) { $knownPanes = @($panes.result.panes) }
-
-$opened = 0
-foreach ($w in $workspaces) {
-  $wsId = $w.workspace_id
-  $already = @($knownPanes | Where-Object { $_.workspace_id -eq $wsId -and $_.label -eq $label }).Count -gt 0
-  if ($already) {
-    Write-Output ("pane already open in " + $wsId)
-    continue
+  if ($text -match "ui_busy") {
+    Write-Output "OmniRoute: another Herdr modal is active, status popup not opened. Try again once it closes."
+    exit 0
   }
-  & $herdr plugin pane open --plugin herdr.omniroute --entrypoint status --workspace $wsId --no-focus 2>&1 | Out-String | Write-Output
-  $opened++
+  if ($r.ExitCode -ne 0) {
+    Write-Output ("OmniRoute: popup open failed - " + $text)
+    exit 1
+  }
+
+  Write-Output "OmniRoute: status popup opened (q or Enter closes it)."
+  exit 0
+} catch {
+  Write-Output ("OmniRoute: popup open failed - " + $_.Exception.Message)
+  exit 1
 }
-Write-Output ("open-status-pane: $opened opened, " + ($workspaces.Count - $opened) + " already open")
-exit 0

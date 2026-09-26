@@ -14,7 +14,7 @@ flowchart LR
   subgraph HERDR["Herdr — multiplexor de sesiones"]
     direction TB
     S["Sesiones de agentes"]
-    P["herdr-omniroute plugin<br/>(status · start · dashboard · pestaña status — prefix+o)"]
+    P["herdr-omniroute plugin<br/>(status · start · dashboard · popup status — prefix+o)"]
   end
   subgraph AGENTES["Agentes (clientes OpenAI-compatible)"]
     direction TB
@@ -54,7 +54,7 @@ flowchart LR
 
 | Layer | Component | Responsibility |
 | --- | --- | --- |
-| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: status tab (UP/DOWN + combos), status dot, actions, `/omniroute` |
+| 0 — Interfaz | Herdr + plugin + pi extension | Visibility and control: on-demand status popup (one snapshot of UP/DOWN + combos), status dot, actions, `/omniroute` |
 | 1 — Agentes | pi, Claude Code, Codex CLI | Arbitrary OpenAI-compatible clients that POST to `:20128/v1` |
 | 2 — Gateway | OmniRoute (`localhost:20128`) | Single entry point; owns combos and provider routing |
 | 3 — Providers | gemini, kimi, OpenCode Free, uncloseai, ... | Real backends; exhausted/slow ones are bypassed by the combo |
@@ -73,8 +73,31 @@ flowchart LR
    only layer where transparent failover is possible.
 5. Control feedback outside the data path:
    - Herdr plugin reports UP/DOWN and can (re)start the daemon (`prefix+o`).
+     The detail is an on-demand popup showing one snapshot taken at open time
+     (no auto refresh, closes on `q` or Enter), never an auto-opened surface.
    - pi extension shows a footer status (`●`/`○`) and warns on non-2xx
      `after_provider_response`.
+
+## How the status popup gets its data
+
+The popup does **not** call the OmniRoute CLI. It reads the gateway's own
+`storage.sqlite` with a `SELECT`-only, read-only connection. That is a
+deliberate boundary, not an optimisation:
+
+- **Latency.** `node omniroute.mjs combo list` cost 3–9 s per frame. The CLI
+  boots `tsx` + Commander, and `isServerUp()` burns a health budget timing out
+  before routing even starts. A direct read costs 33–57 ms.
+- **No visible console.** `bin/cli/utils/cliToken.mjs` gets the machine id via
+  `node-machine-id`, which runs `REG.exe QUERY` through `execSync(...,
+  { shell: true, windowsHide: false })`. That allocates a console host, so every
+  popup flashed a terminal window on the Windows Terminal broker. The direct read
+  launches nothing that wants a window.
+
+Because both the read and the port check are independent, they are started
+through `Start-NativeProcess` and collected afterwards, so the frame pays for
+the slower one instead of their sum. A failed read renders
+`(datos de combos no disponibles: …)` — never an empty list, because a broken
+read must not look like "no combos configured".
 
 ## Why personalization lives in the outer layer (anti-breakage contract)
 
@@ -92,12 +115,15 @@ flowchart LR
 
 | Path | Purpose |
 | --- | --- |
-| `herdr-plugin.toml` | Herdr plugin manifest (4 workspace actions, 1 status pane, 1 startup hook) |
+| `herdr-plugin.toml` | Herdr plugin manifest (4 workspace actions, 1 status popup, no startup hook) |
 | `scripts/status.ps1` | Port 20128 check; exit 0 = up, 1 = down |
 | `scripts/start.ps1` | No-op if up; else `serve --daemon --no-open` |
 | `scripts/dashboard.ps1` | Opens `http://localhost:20128` |
-| `scripts/status-dashboard.ps1` | Live dashboard for the status tab (render loop + `-Once` test switch) |
-| `scripts/open-status-pane.ps1` | Idempotent tab opener (startup hook and `open-status-pane` action) |
+| `scripts/lib/Invoke-Native.ps1` | Windowless external-command helper (`CreateNoWindow`) shared by the scripts. `Start-NativeProcess` / `Complete-NativeProcess` are split so two calls can be in flight at once |
+| `scripts/lib/Read-SqliteQuery.ps1` | Read-only SQLite query: `sqlite3.exe` first, P/Invoke over `winsqlite3.dll` as fallback |
+| `scripts/lib/Get-OmniRouteCombos.ps1` | Resolves OmniRoute's `storage.sqlite` and maps the combos table into the frame's fields |
+| `scripts/status-dashboard.ps1` | Single-snapshot frame for the status popup: reads SQLite and checks the port in parallel, paints once, never repaints, then waits for `q`/Enter (`-MaxSeconds` cap, `-Once` test switch) |
+| `scripts/open-status-pane.ps1` | Opens the single status popup (one `plugin pane open` call, no pane probing) |
 | `docs/status-panes.md` | Reusable pattern for future status plugins |
 | `extensions/omniroute.ts` | pi extension source (deployed to `~/.pi/agent/extensions/`) |
 | `odd/tasks/omniroute-autofallback.md` | Feature tracker (ODD) — evidence of what was built and verified |
