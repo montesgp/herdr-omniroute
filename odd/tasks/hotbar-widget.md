@@ -61,7 +61,8 @@ permite descolapsar. Reutilizable: las opciones y acciones se configuran en `hot
 
 ## Fuera de scope (v1)
 - Submenús por ítem (futuro).
-- Multi-monitor avanzado (v1: monitor primario; `monitor` queda en config para extensión).
+- Multi-monitor avanzado (layouts por monitor / ítems distintos por pantalla). El drag entre
+  monitores con snap ya está en v1.
 - Autostart al login (futuro; se puede hacer con acceso directo en shell:startup).
 - Port a Linux (futuro; la lógica de datos queda desacoplada para eso).
 
@@ -69,15 +70,19 @@ permite descolapsar. Reutilizable: las opciones y acciones se configuran en `hot
 - [x] HB1 — Esqueleto WPF: ventana invisible (Title del window), Topmost=true,
   AllowsTransparency, WindowStyle=None, ShowInTaskbar=false, fondo transparente, forma media
   luna (Border con CornerRadius asimétrico + gradiente oscuro + borde sutil + DropShadow).
-- [x] HB2 — Posicionamiento: monitor primario, derecha-centro (WorkingArea), margen configurable;
-  recálculo en colapso.
+- [x] HB2 — Posicionamiento: monitor activo (config `monitor`: "primary" o nombre de dispositivo
+  p.ej. `\\.\DISPLAY2`), derecha-centro (WorkingArea), margen configurable; recálculo en colapso.
+  **Drag multi-monitor**: arrastrar la barra con el ratón la mueve libre; al soltar, snap al
+  borde derecho del monitor bajo su centro y persistencia de `monitor` en config.json (vale
+  para la próxima ejecución).
 - [x] HB3 — 5 ítems desde `config.json` (glyph por código Unicode, hover con glow, tooltip);
   contrato de `action` (none | omniroute-status | run:… | edit-config), ejecución sin ventanas
   (Invoke-Native para run; Start-Process sin ventana para edit-config).
 - [x] HB4 — Panel inline de OmniRoute: UP/DOWN (netstat :20128 LISTENING) + combos (SQLite) en
   paralelo, honesto `sin datos`; toggle dentro de la ventana del widget.
 - [x] HB5 — Colapso: flecha en semicírculo; clic descolapsa; tamaño/anchura menor; estado no
-  persistido (session-only) en v1.
+  persistido (session-only) en v1. **Chevrones por dirección de movimiento**: collapse muestra
+  `›` (hacia el borde), expand muestra `‹` (hacia el escritorio).
 - [x] HB6 — Limpieza Herdr: borrar hub/menu/open-menu + manifest (acción/pane menu), conservar
   start/status, bump 0.6.0.
 - [x] HB7 — Docs/rebrand: README, docs/architecture.md, docs/hotbar.md, referencias al nombre.
@@ -194,4 +199,12 @@ un ítem o cambiar su acción no requiere tocar código.
   nombre `hotbar`; forma media luna; 4-5 opciones; colapso a flecha. GitHub renombrado a
   `montesgp/hotbar`, remote local actualizado, keybind `prefix+m` removido del config global.
   Repo local aún en ruta antigua (la carpeta se renombra al cierre, avisado al usuario).
-- Pendiente: build delegado (HB1-HB8), verificación del orquestador, E2E visual del usuario.
+- 2026-09-26 (build delegado): hotbar v0.6.0 implementado — hotbar/hotbar.ps1 + libs standalone,
+  hub/menu borrados (manifest solo dashboard/open-status-pane/start/status), docs rebrand a
+  hotbar, `-SelfTest` PASS. 5 commits en main sin push (d1dea17, 8e82523, 10dfe73, 4152b25,
+  8f1fe17).
+- 2026-09-26 (retro del usuario): chevrones de colapso/expansión invertidos y no había drag
+  multi-monitor. Fix: chevrones por dirección de movimiento (collapse `›`, expand `‹`), drag
+  libre con `DragMove()` en espacio vacío de la barra, snap al borde derecho del monitor bajo
+  el centro al soltar, persistencia de `monitor` en config.json. Verificación pendiente:
+  selftest, E2E visual del usuario (arrastrar al monitor derecho).

@@ -6,7 +6,9 @@
   A half-moon shaped widget that lives above every window (including the terminal),
   pinned to the right edge of a monitor and centred vertically. macOS-dock-like:
   a vertical column of round glyph buttons, dark glass, gold on hover, no frame, no
-  taskbar entry.
+  taskbar entry. Drag it with the mouse to move it to another monitor: on release
+  it snaps to the right edge of the monitor under its centre and remembers it in
+  config.json for the next launch.
 
   Everything visible comes from hotbar/config.json. Items are generated at startup
   from a loop, so adding or reordering an entry is a JSON edit, never a code change.
@@ -29,6 +31,18 @@
     so the bytes survive any editor, diff and code page; glyphs come from config as
     0xNNNN strings converted with [char], and the two chevrons baked into the XAML
     use XML numeric entities (&#x2039; / &#x203A;).
+  * The chevrons point where the motion goes, not at the panel: collapse shrinks
+    the bar toward the screen edge (handle shows &#x203A;), expand grows it back
+    into the desktop (tab shows &#x2039;). Flipping them "to match the panel" is a
+    UX regression, not a fix.
+  * Dragging is a window-level MouseLeftButtonDown handler. Buttons mark that
+    routed event as handled, so only empty bar space drags; a click on a button
+    stays a click. On release, Snap-HotbarToActiveScreen latches the right edge to
+    the monitor under the window centre and persists the device name to config.
+  * Screen geometry is converted from physical pixels to device-independent units
+    before it reaches Window.Left/Top. WinForms reports pixels and WPF positions in
+    DIUs, so on a scaled display the two disagree by exactly the scale factor. The
+    drag-snap round-trips the centre through the scale the same way.
   * The data readers live in hotbar/lib as dot-sourced copies, so the widget is
     standalone: it never reaches into the Herdr plugin's script tree.
   * Screen geometry is converted from physical pixels to device-independent units
@@ -101,6 +115,7 @@ $script:Config = $null
 $script:Margin = $script:DefaultMargin
 $script:Collapsed = $false
 $script:PanelOpen = $false
+$script:ActiveScreen = $null
 $script:Window = $null
 
 # ---------------------------------------------------------------------------
@@ -298,7 +313,9 @@ $script:HotbarXaml = @'
                   Height="18"
                   Margin="0,0,0,6"
                   ToolTip="Collapse the bar">
-            <TextBlock Text="&#x2039;" FontSize="13" FontFamily="Segoe UI, Arial" />
+            <!-- The chevron points where the motion goes: collapsing shrinks the
+                 bar toward the screen edge, so the handle points RIGHT. -->
+            <TextBlock Text="&#x203A;" FontSize="13" FontFamily="Segoe UI, Arial" />
           </Button>
           <StackPanel x:Name="ItemsPanel" />
         </StackPanel>
@@ -332,7 +349,9 @@ $script:HotbarXaml = @'
       <Button x:Name="ExpandButton"
               Style="{StaticResource TabButton}"
               ToolTip="Expand the bar">
-        <TextBlock Text="&#x203A;" FontSize="16" FontFamily="Segoe UI, Arial" />
+        <!-- Inverse of the collapse handle: expanding grows the bar LEFT into
+             the desktop, so the chevron points LEFT. -->
+        <TextBlock Text="&#x2039;" FontSize="16" FontFamily="Segoe UI, Arial" />
       </Button>
     </Border>
   </Grid>
@@ -375,6 +394,27 @@ function ConvertFrom-HotbarGlyph {
   return [string][char]$value
 }
 
+<#
+.SYNOPSIS
+  The monitor the bar lives on. "primary" (or an absent field) means the primary
+  display; any other value is matched against the WinForms display device name
+  (for example "\\.\DISPLAY2"), which is what Set-HotbarPersistedMonitor writes
+  back after the bar is dragged to another monitor.
+#>
+function Get-HotbarScreenFromConfig {
+  param($Config)
+
+  $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+  $configured = ""
+  if ($null -ne $Config -and $null -ne $Config.monitor) { $configured = ([string]$Config.monitor).Trim() }
+  if ($configured -and $configured -ne "primary") {
+    foreach ($candidate in [System.Windows.Forms.Screen]::AllScreens) {
+      if ([string]$candidate.DeviceName -eq $configured) { $screen = $candidate; break }
+    }
+  }
+  return $screen
+}
+
 # The widget starts collapsed when the config says so, so the first frame after a
 # restart is the same every time instead of depending on what was on screen.
 function Initialize-HotbarStateFromConfig {
@@ -387,6 +427,8 @@ function Initialize-HotbarStateFromConfig {
     if ([int]::TryParse(([string]$config.margin), [ref]$parsed) -and $parsed -ge 0) { $margin = $parsed }
   }
   $script:Margin = $margin
+
+  $script:ActiveScreen = Get-HotbarScreenFromConfig -Config $config
 
   $collapsed = $false
   if ($null -ne $config.collapsed) { $collapsed = [bool]$config.collapsed }
@@ -427,17 +469,21 @@ function Get-HotbarDpiScale {
 
   With the inline panel open the window grows by the panel width and the LEFT edge
   moves instead, so the bar itself never shifts: the right edge stays pinned to the
-  margin. `monitor` is read from the config but only "primary" is supported in v1;
-  Screen.AllScreens[0] is the primary display on this machine.
+  margin. The screen is the active monitor by default: "primary" (the default in
+  config.json), or the monitor the bar was dragged to last time (persisted as its
+  display device name), or the monitor it was dragged to in this session.
 #>
 function Get-HotbarGeometry {
   [CmdletBinding()]
   param(
     [bool]$Collapsed,
-    [bool]$PanelOpen
+    [bool]$PanelOpen,
+    $Screen = $null
   )
 
-  $working = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  if ($null -eq $Screen) { $Screen = $script:ActiveScreen }
+  if ($null -eq $Screen) { $Screen = [System.Windows.Forms.Screen]::PrimaryScreen }
+  $working = $Screen.WorkingArea
   $scale = Get-HotbarDpiScale
 
   $right = $working.Right / $scale
@@ -470,6 +516,53 @@ function Update-HotbarGeometry {
   $script:Window.Top = $geometry.Y
   $script:Window.Width = $geometry.Width
   $script:Window.Height = $geometry.Height
+}
+
+<#
+.SYNOPSIS
+  After a drag, re-latch the bar to the right edge of the monitor it now sits on.
+
+.DESCRIPTION
+  The window centre is turned back into a physical-pixel point (Left/Top are DIUs
+  and Screen.FromPoint works in pixels, so the scale round-trip matters) and the
+  monitor that owns that point becomes the active one. Changed monitors are
+  persisted to config.json so a restart comes back to the same monitor; a failed
+  write keeps the session placement and only forgets it on the next launch.
+#>
+function Snap-HotbarToActiveScreen {
+  if ($null -eq $script:Window) { return }
+
+  $scale = Get-HotbarDpiScale
+  $centerX = $script:Window.Left + ($script:Window.Width / 2)
+  $centerY = $script:Window.Top + ($script:Window.Height / 2)
+  $point = New-Object System.Drawing.Point(
+    [int][Math]::Round($centerX * $scale),
+    [int][Math]::Round($centerY * $scale))
+
+  $screen = [System.Windows.Forms.Screen]::FromPoint($point)
+  if ($null -ne $screen -and $null -ne $script:ActiveScreen -and
+      $screen.DeviceName -ne $script:ActiveScreen.DeviceName) {
+    $script:ActiveScreen = $screen
+    Set-HotbarPersistedMonitor -Screen $screen
+  }
+  Update-HotbarGeometry
+}
+
+# Writes the `monitor` field of config.json. The checked-in default is "primary";
+# after a drag it becomes the display device name ("\\.\DISPLAY2" and friends),
+# which is exactly what Get-HotbarScreenFromConfig matches on the next launch.
+function Set-HotbarPersistedMonitor {
+  param($Screen)
+
+  try {
+    $config = Read-HotbarConfig
+    if ([string]$config.monitor -eq [string]$Screen.DeviceName) { return }
+    $config.monitor = [string]$Screen.DeviceName
+    $json = $config | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($script:ConfigPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+  } catch {
+    # Best effort only: the in-session placement above already stands.
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -589,6 +682,18 @@ function New-HotbarWindow {
   $window.Add_KeyDown({
       param($sender, $eventArgs)
       if ($null -ne $eventArgs -and $eventArgs.Key -eq [System.Windows.Input.Key]::Escape) { $window.Close() }
+    })
+
+  # Drag the bar between monitors. Buttons mark MouseLeftButtonDown as handled
+  # (that is what makes a click a click), so an unhandled press here means empty
+  # bar space and the whole window moves. On release the bar snaps back to the
+  # right edge of the monitor its centre ended up on.
+  $window.Add_MouseLeftButtonDown({
+      param($sender, $eventArgs)
+      if ($null -ne $eventArgs -or -not $eventArgs.Handled) {
+        try { $window.DragMove() } catch { }
+        Snap-HotbarToActiveScreen
+      }
     })
 
   $bar = Get-HotbarElement -Window $window -Name "BarBorder"
@@ -1043,10 +1148,15 @@ function Invoke-HotbarSelfTest {
     $window = New-HotbarWindow
     $report += ("xaml=ok buttons=" + (Get-HotbarElement -Window $window -Name "ItemsPanel").Children.Count)
 
-    $expanded = Get-HotbarGeometry -Collapsed $false -PanelOpen $false
-    $collapsed = Get-HotbarGeometry -Collapsed $true -PanelOpen $false
-    $withPanel = Get-HotbarGeometry -Collapsed $false -PanelOpen $true
-    $working = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $primary = [System.Windows.Forms.Screen]::PrimaryScreen
+    $active = Get-HotbarScreenFromConfig -Config $config
+    if ($null -eq $active) { $failures += "screen resolution returned no monitor" }
+    $report += ("monitor=" + $active.DeviceName)
+
+    $expanded = Get-HotbarGeometry -Collapsed $false -PanelOpen $false -Screen $primary
+    $collapsed = Get-HotbarGeometry -Collapsed $true -PanelOpen $false -Screen $primary
+    $withPanel = Get-HotbarGeometry -Collapsed $false -PanelOpen $true -Screen $primary
+    $working = $primary.WorkingArea
     $scale = $expanded.Scale
 
     $expectedX = [Math]::Round((($working.Right / $scale) - $script:BarWidth - $script:Margin), 0)
