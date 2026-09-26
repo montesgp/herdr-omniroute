@@ -4,11 +4,13 @@
 > Este documento es la plantilla de referencia. `herdr-omniroute` es su primer caso real.
 
 > Este documento cubre el patrón **popup** (modal de sesión, una foto, cierre con
-> `q`/Enter). El mismo repo lo usa dos veces: el status de OmniRoute y el
-> [menú del Herdr Hub](hub.md), que es el mismo popup con teclas en lugar de texto.
+> `q`/Enter). El status de OmniRoute es su caso real.
 > Un split que permanece visible también es posible (`placement = "split"`), pero
 > cobra ancho de forma permanente para algo que se mira un segundo. Un popup se
 > paga solo mientras está abierto, o no se paga.
+>
+> La barra flotante [hotbar](hotbar.md) ya no usa este patrón: es un widget WPF
+> independiente que vive por encima de Herdr en lugar de dentro de su TUI.
 
 ## Qué es un status pane
 
